@@ -53,8 +53,9 @@ SCHEDULER_CONFIG_PATH = SCRIPT_DIR / "scheduler_config.json"
 LOGS_DIR = SCRIPT_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 
-BETTERGI_ONEDRAGON_DIR = r"E:\原神\BetterGI\BetterGI\User\OneDragon"
-BETTERGI_USER_DIR = r"E:\原神\BetterGI\BetterGI\User"
+# 以下路径不再硬编码，由 discover_xxx 函数从 config.json 的 bettergi.config 动态推导
+# BETTERGI_USER_DIR = os.path.dirname(cfg["bettergi"]["config"])
+# BETTERGI_ONEDRAGON_DIR = os.path.join(BETTERGI_USER_DIR, "OneDragon")
 
 GLOBAL_CLEANUP_TARGETS = [
     "BetterGI.exe",
@@ -206,18 +207,34 @@ def disable_autostart():
         pass
 
 
+def _get_bettergi_user_dir():
+    """从 config.json 的 bettergi.config 路径推导 BetterGI User 目录"""
+    cfg = load_config()
+    bc = cfg.get("bettergi", {}).get("config", "")
+    if not bc or bc.startswith("请选择"):
+        return ""
+    d = os.path.dirname(bc)
+    return d if os.path.isdir(d) else ""
+
+
 def discover_onedragon_configs():
     """扫描 OneDragon 目录，返回可用配置名列表"""
     configs = []
-    if os.path.isdir(BETTERGI_ONEDRAGON_DIR):
-        for f in glob.glob(os.path.join(BETTERGI_ONEDRAGON_DIR, "*.json")):
-            configs.append(os.path.splitext(os.path.basename(f))[0])
+    user_dir = _get_bettergi_user_dir()
+    if user_dir:
+        od_dir = os.path.join(user_dir, "OneDragon")
+        if os.path.isdir(od_dir):
+            for f in glob.glob(os.path.join(od_dir, "*.json")):
+                configs.append(os.path.splitext(os.path.basename(f))[0])
     return sorted(configs)
 
 
 def discover_scheduler_groups():
     """扫描 BetterGI ScriptGroup 目录，返回可用配置组名列表"""
-    groups_dir = os.path.join(BETTERGI_USER_DIR, "ScriptGroup")
+    user_dir = _get_bettergi_user_dir()
+    if not user_dir:
+        return []
+    groups_dir = os.path.join(user_dir, "ScriptGroup")
     groups = []
     if os.path.isdir(groups_dir):
         for f in glob.glob(os.path.join(groups_dir, "*.json")):
