@@ -95,22 +95,22 @@ def load_config():
     defaults = {
         "accounts": [],
         "bettergi": {
-            "exe": "E:\\原神\\BetterGI\\BetterGI\\BetterGI.exe",
-            "config": "E:\\原神\\BetterGI\\BetterGI\\User\\config.json",
+            "exe": "",
+            "config": "",
         },
         "snap_hutao": {
-            "exe": "D:\\原神\\胡桃工具箱\\Repository\\Snap.ContentDelivery\\Snap.Hutao.Remastered.FullTrust.exe",
+            "exe": "",
             "app_id": "E8B6E2B3-D2A0-4435-A81D-2A16AAF405C8_k3erpsn8bwzzy!App",
         },
         "genshin": {
-            "exe": "E:\\原神\\Genshin Impact\\Genshin Impact Game\\YuanShen.exe",
+            "exe": "",
             "process_name": "YuanShen.exe",
         },
         "monitor": {
             "max_wait_seconds": 7200,
         },
         "tesseract": {
-            "path": "C:/Program Files/Tesseract-OCR",
+            "path": "",
         },
         "hotkeys": {
             "stop": "ctrl+shift+q",
@@ -215,6 +215,16 @@ def _get_bettergi_user_dir():
         return ""
     d = os.path.dirname(bc)
     return d if os.path.isdir(d) else ""
+
+
+def _get_bettergi_log_dir():
+    """从 config.json 的 bettergi 路径推导 BetterGI 日志目录"""
+    cfg = load_config()
+    gi_exe = cfg.get("bettergi", {}).get("exe", "")
+    if not gi_exe or not os.path.isfile(gi_exe):
+        return ""
+    log_dir = os.path.join(os.path.dirname(gi_exe), "log")
+    return log_dir if os.path.isdir(log_dir) else ""
 
 
 def discover_onedragon_configs():
@@ -420,7 +430,8 @@ def monitor_bettergi_log(log_date_str, timeout_sec, log_func, stop_event):
     一条龙任务包含多个子任务（邮件→脚本→追踪），每个子任务都会写"任务结束"。
     当检测到「一条龙和配置组任务结束」紧接着「任务结束」时，判定整条龙真正完成。
     """
-    log_path = f"E:\\原神\\BetterGI\\BetterGI\\log\\better-genshin-impact{log_date_str}.log"
+    log_dir = _get_bettergi_log_dir()
+    log_path = os.path.join(log_dir, f"better-genshin-impact{log_date_str}.log") if log_dir else ""
     log_func(f"监控日志: {log_path}")
     start_t = time.time()
 
@@ -502,7 +513,8 @@ def monitor_config_group(log_date_str, group_name, timeout_sec, log_func, stop_e
     检测到 配置组 "xxx" 执行结束 时返回 True。
     仅用于 --startGroups 的单组执行监控，不处理一条龙完成检测。
     """
-    log_path = f"E:\\原神\\BetterGI\\BetterGI\\log\\better-genshin-impact{log_date_str}.log"
+    log_dir = _get_bettergi_log_dir()
+    log_path = os.path.join(log_dir, f"better-genshin-impact{log_date_str}.log") if log_dir else ""
     log_func(f"监控配置组日志: {log_path}")
     start_t = time.time()
 
@@ -1372,7 +1384,8 @@ def ocr_genshin_uid_bettergi(group_name, log_func, stop_event, max_retries=3):
         return ""
 
     log_date_str = datetime.now().strftime("%Y%m%d")
-    log_path = f"E:\\原神\\BetterGI\\BetterGI\\log\\better-genshin-impact{log_date_str}.log"
+    log_dir = _get_bettergi_log_dir()
+    log_path = os.path.join(log_dir, f"better-genshin-impact{log_date_str}.log") if log_dir else ""
 
     for attempt in range(max_retries):
         if stop_event.is_set():
@@ -2529,7 +2542,7 @@ class SettingsDialog(tk.Toplevel):
 
         # 8. Tesseract 安装目录 (可选)
         self.tesseract_var = tk.StringVar(
-            value=cfg.get("tesseract", {}).get("path", "C:/Program Files/Tesseract-OCR"))
+            value=cfg.get("tesseract", {}).get("path", ""))
         ttk.Label(inner, text="Tesseract OCR 目录 (可选)", foreground=label_fg,
                   background=COLORS["bg"]).pack(anchor="w", **pad)
         row = tk.Frame(inner, bg=COLORS["bg"])
