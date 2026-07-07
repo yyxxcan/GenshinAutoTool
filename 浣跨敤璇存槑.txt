@@ -18,7 +18,7 @@
 
 BetterGI 是真正执行游戏内自动化操作的软件（战斗、委托、领取奖励等）。
 
-- 下载地址：请自行搜索下载
+- 下载地址：https://github.com/babalae/better-genshin-impact
 - 下载最新 Release 的压缩包，解压到任意目录（不需要安装）。
 - 打开 BetterGI，在「自动任务」→「一条龙」页面配置好你的任务流程。（不会配去 B 站搜 "BetterGI 一条龙教程"）
 
