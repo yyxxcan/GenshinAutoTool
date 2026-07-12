@@ -21,6 +21,55 @@
 
   其余项按需调整。config.json 由程序自动管理，不要手动编辑。
 
+config.json 配置项详解
+  配置文件位于程序同级目录。运行时自动生成默认值，无需手动创建。
+
+  bettergi
+    exe         BetterGI 主程序路径
+    config      BetterGI 的 User 配置文件路径
+
+  snap_hutao
+    exe         胡桃工具箱主程序路径
+    app_id      胡桃 MSIX 应用 ID（固定值，无需修改）
+
+  genshin
+    exe             原神主程序路径
+    process_name    游戏进程名（YuanShen.exe / GenshinImpact.exe）
+
+  monitor
+    max_wait_seconds  BetterGI 一条龙最大等待秒数（默认 7200，即 2 小时）
+
+  tesseract
+    path  Tesseract OCR 目录路径（默认空，需手动配置）
+
+  hotkeys
+    stop   全局停止快捷键（默认 ctrl+shift+q）
+    pause  全局暂停/继续快捷键（默认 ctrl+shift+p）
+
+  uid
+    method          UID 识别方式：tesseract（默认）/ bettergi
+    bettergi_group  BetterGI 配置组名（method=bettergi 时生效）
+
+  settings
+    auto_minimize       启动定时器后自动最小化到托盘（默认 true）
+    minimize_on_close   关闭窗口时最小化到托盘而非退出（默认 true）
+    auto_shutdown       全部账号完成后自动关机（默认 false）
+
+  accounts（账号数组，每项字段）
+    name           账号显示名称
+    launch_method  启动方式：direct（直接）/ hutao（胡桃）
+    config_name    BetterGI 一条龙配置名
+    uid            游戏 UID（9 位数字）
+    enabled        是否勾选（true / false）
+
+  定时计划 (scheduler_config.json，独立文件)
+    name       任务名称
+    type       触发类型：daily / weekly / once / date
+    time       触发时间（HH:MM）
+    weekdays   每周哪几天（type=weekly 时，0=周一）
+    date       指定日期（type=date 时，YYYY-MM-DD）
+    enabled    是否启用
+
 账号管理
   「+ 添加账号」→ 填写名称、启动方式（直接启动/胡桃启动）、
   BetterGI 一条龙配置名、游戏 UID。勾选后「开始」即逐号执行。
@@ -39,3 +88,44 @@
   - 首次使用只勾一个号试运行
   - 电脑不要休眠/睡眠，否则定时任务无法触发
   - tesseract-ocr/ 必须和 exe 同级
+
+常见问题
+
+  Q: Tesseract OCR 识别失败或报错"找不到 tesseract"
+  原因：tesseract-ocr/ 未与 exe 同级，或目录结构不完整。
+  解决：
+    1. 确认 exe 同级有 tesseract-ocr/ 文件夹，内含 tesseract.exe
+    2. 在设置中重新选择 Tesseract OCR 目录
+    3. 若仍无法使用，在设置中将「UID 识别方式」改为 bettergi，
+       由 BetterGI 内部完成 UID 读取（无需 tesseract）
+
+  Q: 提示"程序已在运行中"
+  原因：工具已有一个实例在运行（通过文件锁防重复启动）。
+  解决：检查系统托盘是否已有工具图标，双击打开；
+       或通过任务管理器结束旧进程。
+
+  Q: 检测不到游戏窗口 / 账号登录失败
+  原因：游戏进程未启动、窗口标题异常、或游戏处于全屏。
+  解决：
+    1. 确认游戏为窗口化模式（全屏无法操作）
+    2. 确认 genshin.process_name 与实际进程名一致
+       （国际服为 GenshinImpact.exe）
+    3. 首次使用只勾一个号测试，日志窗口可看到详细错误信息
+
+  Q: 托盘图标不显示
+  原因：Windows 可能隐藏了托盘图标，或旧实例残留僵尸图标影响新实例。
+  解决：
+    1. 展开系统托盘折叠区（点击任务栏 ^ 箭头），检查图标是否在其中
+    2. 若仍无，在任务管理器中结束所有 GenshinMultiAccountTool.exe 进程后重开
+    3. 若旧图标残留（不可点击），工具启动时已自动触发托盘刷新；
+       如无效，重启 Windows 资源管理器
+
+  Q: 定时任务到点不执行
+  原因：定时器未启动、电脑休眠、或任务 enabled 为 false。
+  解决：
+    1. 确认定时计划窗口中「定时器」状态为「运行中」，
+       任务列表勾选项已启用
+    2. 电脑不能休眠/睡眠，否则定时器线程挂起
+    3. 若到点未触发，检查系统时间是否正确，
+       手动点「一键启动全部」看是否能正常执行一次性任务
+    4. 若需无人值守运行，搭配「开机自启」+ 电源选项「永不睡眠」
