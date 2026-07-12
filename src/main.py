@@ -3741,7 +3741,7 @@ class GenshinMultiAccountToolGUI:
         title_lbl.pack(side="left")
 
         version_lbl = tk.Label(self.title_bar,
-                               text=" v5.3 ",
+                               text=" v5.4 ",
                                bg=COLORS["primary_dark"],
                                fg="#A0C8E8",
                                font=("Microsoft YaHei", 9))
