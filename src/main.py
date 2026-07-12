@@ -2952,6 +2952,9 @@ class SchedulerDialog(tk.Toplevel):
         self.cfg = load_scheduler_config()
 
         self.title("定时任务管理")
+        ico = _gen_icon()
+        if ico:
+            self.iconbitmap(ico)
         self.minsize(500, 300)
         self.resizable(True, True)
         self.geometry("650x580")
