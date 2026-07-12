@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GenshinAutoTool 单版本打包脚本"""
+"""GenshinMultiAccountTool 单版本打包脚本"""
 
 import shutil, os, sys, subprocess
 from pathlib import Path
@@ -9,7 +9,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DIST_DIR = SCRIPT_DIR / "dist"
 BUILD_DIR = SCRIPT_DIR / "build"
 EXE_NAME = "GenshinMultiAccountTool"
-ARCHIVE_NAME = "GenshinAutoTool"
+ARCHIVE_NAME = "GenshinMultiAccountTool"
 PACKAGE_DIR = DIST_DIR / ARCHIVE_NAME
 
 def run(cmd_args):

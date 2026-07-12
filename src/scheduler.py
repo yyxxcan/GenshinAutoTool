@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GenshinAutoScheduler - 原神一条龙定时启动器
+GenshinMultiAccountScheduler - 原神一条龙定时启动器
 ===========================================
-一个简单的 GUI 程序，用来定时启动 GenshinAutoTool。
+一个简单的 GUI 程序，用来定时启动 GenshinMultiAccountTool。
 """
 
 import os, sys, json, time, subprocess, threading
@@ -23,7 +23,7 @@ CONFIG_PATH = SCRIPT_DIR / "scheduler_config.json"
 # ============================================================
 def load_config():
     defaults = {
-        "exe_path": "GenshinAutoTool_NoAccounts.exe",
+        "exe_path": "GenshinMultiAccountTool_NoAccounts.exe",
         "schedules": []
     }
     if CONFIG_PATH.is_file():
@@ -42,7 +42,7 @@ def save_config(cfg):
 # ============================================================
 # 主窗口
 # ============================================================
-class GenshinAutoScheduler:
+class GenshinMultiAccountScheduler:
     def __init__(self, root):
         self.root = root
         self.root.title("原神一条龙定时启动器")
@@ -63,7 +63,7 @@ class GenshinAutoScheduler:
         title_bar.pack(side="top", fill="x", padx=20, pady=(15, 5))
         tk.Label(title_bar, text="原神一条龙定时启动器", font=("Microsoft YaHei", 16, "bold"),
                  bg="#F5F8FC", fg="#2C3E50").pack()
-        tk.Label(title_bar, text="设置定时任务，自动启动 GenshinAutoTool", font=("Microsoft YaHei", 10),
+        tk.Label(title_bar, text="设置定时任务，自动启动 GenshinMultiAccountTool", font=("Microsoft YaHei", 10),
                  bg="#F5F8FC", fg="#7F8C8D").pack()
 
         # ---- 控制栏（固定） ----
@@ -123,7 +123,7 @@ class GenshinAutoScheduler:
         add_section.pack(fill="x", padx=10, pady=(10, 5))
 
         # 程序路径
-        tk.Label(add_section, text="GenshinAutoTool 程序路径:",
+        tk.Label(add_section, text="GenshinMultiAccountTool 程序路径:",
                  bg="#FFFFFF", fg="#2C3E50").pack(anchor="w")
         path_frame = tk.Frame(add_section, bg="#FFFFFF")
         path_frame.pack(fill="x", pady=(2, 8))
@@ -283,7 +283,7 @@ class GenshinAutoScheduler:
 # ============================================================
 def main():
     root = tk.Tk()
-    app = GenshinAutoScheduler(root)
+    app = GenshinMultiAccountScheduler(root)
     root.mainloop()
 
 if __name__ == "__main__":
