@@ -16,19 +16,49 @@
 
 另外，tesseract-ocr 文件夹必须跟 GenshinMultiAccountTool.exe 放在同一个目录下（压缩包里已经带好了）。
 
-2.2 设置游戏路径
+2.2 设置路径
 
-打开软件后，点击右上角的「设置」，会弹出一个设置窗口。按顺序填：
+打开软件后，点击右上角的「设置」，弹出设置窗口。每一项都要填对，路径选错了工具就跑不起来。
 
-【BetterGI 路径（必填，两个都要选）】
-- BetterGI 可执行文件：点「浏览」，找到你的 BetterGI.exe。
-- BetterGI 配置文件：点「浏览」，找到 BetterGI 目录里的 User\config.json。这是 BetterGI 的一条龙配置，工具需要知道你已经配好了哪些任务。
+--- ① BetterGI 可执行文件 ---
+就是 BetterGI 的主程序 BetterGI.exe。
 
-【原神路径（必填）】
-- 原神可执行文件：点「浏览」，找到你的 YuanShen.exe。国际服用户选 GenshinImpact.exe。
-- 原神进程名：一般不用改。默认填的是 YuanShen.exe，国际服用户手动改成 GenshinImpact.exe。这个名字是用来判断游戏有没有在运行的，写错就检测不到游戏。
+怎么找到它：
+- 方法一（推荐）：桌面找到 BetterGI 快捷方式 → 右键 →「打开文件所在位置」，跳出来的文件夹里就有 BetterGI.exe。
+- 方法二：如果你记得安装在哪，直接进去找。常见位置：
+  · C:\Program Files\BetterGI\BetterGI.exe
+  · D:\BetterGI\BetterGI.exe
+- 找不到怎么办：打开任意文件夹，顶部搜索栏输入 BetterGI.exe，等结果出来后记下位置。
 
-填完后点「保存」。
+--- ② BetterGI 配置文件 ---
+即 BetterGI 目录下的 User\config.json，里面存着你在 BetterGI 里配好的一条龙任务。
+
+怎么找到它：
+- 先找到 BetterGI 文件夹（和上一步一样的方法）
+- 打开后，里面有一个叫 User 的子文件夹，点进去，选 config.json
+- 如果没看到 User 文件夹：说明还没运行过 BetterGI。打开 BetterGI.exe 一次，关掉后 User 文件夹会自动生成
+
+--- ③ 原神可执行文件 ---
+国服叫 YuanShen.exe，国际服叫 GenshinImpact.exe。
+
+怎么找到它：
+- 方法一（推荐）：桌面找到原神快捷方式 → 右键 →「打开文件所在位置」。如果快捷方式指向启动器，进去还有一个 Genshin Impact Game 子文件夹，点进去就能找到。
+- 常见安装位置：
+  · C:\Program Files\Genshin Impact\Genshin Impact Game\YuanShen.exe
+  · D:\Genshin Impact\Genshin Impact Game\YuanShen.exe
+  · 国际服：...\Genshin Impact Game\GenshinImpact.exe
+- 找不到怎么办：打开任意文件夹，顶部搜索 YuanShen.exe（国际服搜 GenshinImpact.exe）。
+
+--- ④ 原神进程名 ---
+用来判断游戏有没有在运行，写错就检测不到游戏。
+- 国服：YuanShen.exe（默认值，一般不用改）
+- 国际服：GenshinImpact.exe
+
+怎么判断国服还是国际服：用国内手机号登录的是国服，用邮箱和国外账号登录的是国际服。
+
+----
+
+填完上面四项后点「保存」。
 
 重要提示：游戏必须设置为窗口化运行。全屏模式下工具无法操作游戏画面。
 
@@ -70,9 +100,9 @@
 - BetterGI 调度组（推荐）：BetterGI 内部直接读 UID。不需要 Tesseract，准确度更高。选这个后在下拉框里选调度组。
 
 【高级路径（一般不用动）】
-- 胡桃工具箱路径：仅胡桃切号时需要。
+- 胡桃工具箱路径：仅胡桃切号时需要。桌面找到胡桃快捷方式 → 右键 →「打开文件所在位置」→ 找到 Snap.Hutao.exe，选中即可。常见位置：C:\Users\你的用户名\AppData\Local\Hutao\Snap.Hutao.exe。
 - 胡桃 AppID：仅 MSIX 版胡桃需要。
-- Tesseract OCR 目录：选 Tesseract UID 方案时需要。
+- Tesseract OCR 目录：选 Tesseract UID 方案时需要。自带版直接选 exe 旁边的 tesseract-ocr 文件夹；自己装的常见位置：C:\Program Files\Tesseract-OCR。找不到搜 tesseract.exe。
 - 一条龙超时时间：默认 7200 秒（2 小时）。超时未完成会跳过当前号。
 
 三、常用功能介绍
