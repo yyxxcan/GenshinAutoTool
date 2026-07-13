@@ -3242,6 +3242,7 @@ class SchedulerDialog(tk.Toplevel):
         self.acct_canvas.bind("<Leave>", lambda e: self.acct_canvas.unbind_all("<MouseWheel>"))
 
         self._acct_vars = {}
+        self._acct_items = []  # (name, var, cb) 用于刷新标签
         accounts = self.gui.cfg.get("accounts", [])
         self._acct_rows = []  # 拖拽排序用
         if accounts:
@@ -3252,10 +3253,13 @@ class SchedulerDialog(tk.Toplevel):
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=f"  {i+1}. {acc['name']}", variable=var,
+                cb = tk.Checkbutton(row, text=f"    {acc['name']}", variable=var,
                                     bg="#FFFFFF", activebackground="#FFFFFF",
                                     font=("Microsoft YaHei", 9))
                 cb.pack(side="left", padx=(4, 0))
+
+                self._acct_items.append((acc["name"], var, cb))
+                var.trace_add("write", lambda *a: self._refresh_acct_labels())
 
                 # 整行可拖拽
                 for w in (row, cb):
@@ -3270,6 +3274,7 @@ class SchedulerDialog(tk.Toplevel):
             # 拖拽指示线（初始隐藏）
             self._acct_drag_line = tk.Frame(self.acct_inner, bg=COLORS["primary"], height=2)
             self._acct_drag_data = {"source_idx": -1, "dragging": False}
+            self._refresh_acct_labels()
         else:
             tk.Label(self.acct_inner, text="（暂无账号）", bg="#FFFFFF",
                      fg=COLORS["text_light"], font=("Microsoft YaHei", 9)).pack(anchor="w", padx=4)
@@ -3612,11 +3617,24 @@ class SchedulerDialog(tk.Toplevel):
         save_config(self.gui.cfg)
         self._rebuild_acct_list()
 
+    def _refresh_acct_labels(self):
+        """根据勾选状态刷新账号行标签：仅勾选的显示序号"""
+        if not self._acct_items:
+            return
+        seq = 1
+        for name, var, cb in self._acct_items:
+            if var.get():
+                cb.config(text=f"  {seq}. {name}")
+                seq += 1
+            else:
+                cb.config(text=f"    {name}")
+
     def _rebuild_acct_list(self):
         """重建账号列表 UI（保留勾选状态）"""
         for w in self.acct_inner.winfo_children():
             w.destroy()
         self._acct_rows = []
+        self._acct_items = []
         accounts = self.gui.cfg.get("accounts", [])
         if accounts:
             for i, acc in enumerate(accounts):
@@ -3625,14 +3643,17 @@ class SchedulerDialog(tk.Toplevel):
                 if var is None:
                     var = tk.BooleanVar(value=False)
                     self._acct_vars[name] = var
+                    var.trace_add("write", lambda *a: self._refresh_acct_labels())
 
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=f"  {i+1}. {name}", variable=var,
+                cb = tk.Checkbutton(row, text=f"    {name}", variable=var,
                                     bg="#FFFFFF", activebackground="#FFFFFF",
                                     font=("Microsoft YaHei", 9))
                 cb.pack(side="left", padx=(4, 0))
+
+                self._acct_items.append((name, var, cb))
 
                 for w in (row, cb):
                     w.bind("<Button-1>", lambda e, idx=i: self._acct_drag_start(e, idx))
@@ -3644,6 +3665,7 @@ class SchedulerDialog(tk.Toplevel):
 
             self._acct_drag_line = tk.Frame(self.acct_inner, bg=COLORS["primary"], height=2)
             self._acct_drag_data = {"source_idx": -1, "dragging": False}
+            self._refresh_acct_labels()
         else:
             tk.Label(self.acct_inner, text="（暂无账号）", bg="#FFFFFF",
                      fg=COLORS["text_light"], font=("Microsoft YaHei", 9)).pack(anchor="w", padx=4)
