@@ -3100,6 +3100,20 @@ class SchedulerDialog(tk.Toplevel):
         self.hour_var.trace_add("write", self._validate_hour)
         self.minute_var.trace_add("write", self._validate_minute)
 
+        # 分钟微调按钮行
+        mrow = tk.Frame(add_frame, bg="#FFFFFF")
+        mrow.pack(fill="x", padx=10, pady=(4, 6))
+        tk.Button(mrow, text="-5分", command=lambda: self._adj_minutes(-5),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
+        tk.Button(mrow, text="+5分", command=lambda: self._adj_minutes(5),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 12))
+        for m in (15, 30, 45):
+            tk.Button(mrow, text=f"{m}分", command=lambda mm=m: self._set_minute(mm),
+                      bg="#E8F5E9", fg=COLORS["text"], relief="flat",
+                      font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
+
         # 日期（一次性模式）
         self.date_frame = tk.Frame(add_frame, bg="#FFFFFF")
         tk.Label(self.date_frame, text="执行日期:", bg="#FFFFFF",
@@ -3359,6 +3373,17 @@ class SchedulerDialog(tk.Toplevel):
         else:
             self._prev_minute = val
 
+    def _adj_minutes(self, delta):
+        h = int(self.hour_var.get() or 8)
+        m = int(self.minute_var.get() or 0)
+        total = h * 60 + m + delta
+        total %= 24 * 60
+        self._set_time(f"{total // 60:02d}", f"{total % 60:02d}")
+
+    def _set_minute(self, m):
+        h = self.hour_var.get() or "08"
+        self._set_time(h, f"{m:02d}")
+
     def _on_mode_change(self):
         mode = self.mode_var.get()
         if mode == "once":
@@ -3511,8 +3536,8 @@ class SchedulerDialog(tk.Toplevel):
             messagebox.showwarning("提示", "请至少选择一个账号", parent=self)
             return
 
-        hour = self.hour_var.get().zfill(2)
-        minute = self.minute_var.get().zfill(2)
+        hour = (self.hour_var.get() or "08").zfill(2)
+        minute = (self.minute_var.get() or "00").zfill(2)
         if not (re.match(r"^\d{2}$", hour) and 0 <= int(hour) <= 23 and
                 re.match(r"^\d{2}$", minute) and 0 <= int(minute) <= 59):
             messagebox.showwarning("提示",
