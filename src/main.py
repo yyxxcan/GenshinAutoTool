@@ -3071,7 +3071,7 @@ class SchedulerDialog(tk.Toplevel):
 
         # 快捷时间（两排）
         q1 = tk.Frame(add_frame, bg="#FFFFFF")
-        q1.pack(fill="x", padx=10, pady=(4, 0))
+        q1.pack(fill="x", padx=10, pady=(4, 3))
         q2 = tk.Frame(add_frame, bg="#FFFFFF")
         q2.pack(fill="x", padx=10, pady=(0, 2))
         for i, (label, h, m) in enumerate(self.QUICK_TIMES):
