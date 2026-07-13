@@ -3220,14 +3220,17 @@ class SchedulerDialog(tk.Toplevel):
         self.acct_canvas.pack(fill="both", expand=True)
 
         self.acct_inner = tk.Frame(self.acct_canvas, bg="#FFFFFF")
-        self.acct_canvas.create_window((0, 0), window=self.acct_inner, anchor="nw")
+        self.acct_canvas.create_window((0, 0), window=self.acct_inner,
+                                       anchor="nw", tags="acct_inner_win")
 
         def _on_acct_inner_resize(event):
             self.acct_canvas.configure(scrollregion=self.acct_canvas.bbox("all"))
             self.after(50, self._update_acct_scrollbar)
         self.acct_inner.bind("<Configure>", _on_acct_inner_resize)
         self.acct_canvas.bind("<Configure>",
-            lambda e: self.after(50, self._update_acct_scrollbar))
+            lambda e: (self.acct_canvas.itemconfig("acct_inner_win",
+                                                   width=e.width),
+                       self.after(50, self._update_acct_scrollbar)))
 
         def _acct_mousewheel(event):
             if not self.acct_canvas.winfo_exists():
@@ -3249,7 +3252,7 @@ class SchedulerDialog(tk.Toplevel):
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=acc["name"], variable=var,
+                cb = tk.Checkbutton(row, text=f"  {i+1}. {acc['name']}", variable=var,
                                     bg="#FFFFFF", activebackground="#FFFFFF",
                                     font=("Microsoft YaHei", 9))
                 cb.pack(side="left", padx=(4, 0))
@@ -3626,7 +3629,7 @@ class SchedulerDialog(tk.Toplevel):
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=name, variable=var,
+                cb = tk.Checkbutton(row, text=f"  {i+1}. {name}", variable=var,
                                     bg="#FFFFFF", activebackground="#FFFFFF",
                                     font=("Microsoft YaHei", 9))
                 cb.pack(side="left", padx=(4, 0))
