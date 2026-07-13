@@ -3834,6 +3834,7 @@ class SchedulerDialog(tk.Toplevel):
         self._load_list()
         self.status_var.set("已添加")
         self._update_status()
+        self.refresh_btn()
 
     def _delete_selected(self):
         indices = [i for i, v in enumerate(self._task_vars) if v.get()]
@@ -3845,6 +3846,7 @@ class SchedulerDialog(tk.Toplevel):
             self.cfg["schedules"].pop(idx)
         save_scheduler_config(self.cfg)
         self._load_list()
+        self.refresh_btn()
         self.status_var.set(f"已删除 {len(indices)} 个任务")
         self._update_status()
 
@@ -3870,9 +3872,9 @@ class SchedulerDialog(tk.Toplevel):
             self.gui.scheduler_running = True
             self.gui.scheduler_thread = threading.Thread(target=self.gui._scheduler_loop, daemon=True)
             self.gui.scheduler_thread.start()
-            self.toggle_btn.config(text="停止定时器", bg="#E74C3C", activebackground="#C0392B")
             self.gui._log("定时器已启动（一键启用全部任务）")
             self._load_list()
+            self.refresh_btn()
             # 缩到托盘，不在任务栏显示
             if self.cfg.get("settings", {}).get("auto_minimize", True):
                 self.gui.root.after(300, self.gui._minimize_to_tray)
@@ -3880,8 +3882,9 @@ class SchedulerDialog(tk.Toplevel):
                 self.gui._rebuild_tray_menu()
         else:
             self.gui.scheduler_running = False
-            self.toggle_btn.config(text="一键启动全部", bg="#52C41A", activebackground="#389E0D")
             self.gui._log("定时器已停止")
+            self._load_list()
+            self.refresh_btn()
             if self.gui.tray:
                 self.gui._rebuild_tray_menu()
         self._update_status()
