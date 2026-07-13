@@ -3094,6 +3094,12 @@ class SchedulerDialog(tk.Toplevel):
         tk.Label(t_row, text="分", bg="#FFFFFF", fg=COLORS["text"],
                  font=("Microsoft YaHei", 9)).pack(side="left")
 
+        self._trace_suppress = False
+        self._prev_hour = self.hour_var.get()
+        self._prev_minute = self.minute_var.get()
+        self.hour_var.trace_add("write", self._validate_hour)
+        self.minute_var.trace_add("write", self._validate_minute)
+
         # 日期（一次性模式）
         self.date_frame = tk.Frame(add_frame, bg="#FFFFFF")
         tk.Label(self.date_frame, text="执行日期:", bg="#FFFFFF",
@@ -3320,8 +3326,38 @@ class SchedulerDialog(tk.Toplevel):
             self.task_canvas.pack(fill="both", expand=True)
 
     def _set_time(self, h, m):
+        self._trace_suppress = True
         self.hour_var.set(h)
         self.minute_var.set(m)
+        self._trace_suppress = False
+
+    def _validate_hour(self, *args):
+        if self._trace_suppress:
+            return
+        val = self.hour_var.get()
+        if not val:
+            self._prev_hour = ""
+            return
+        if not val.isdigit() or int(val) > 23 or len(val) > 2:
+            self._trace_suppress = True
+            self.hour_var.set(self._prev_hour)
+            self._trace_suppress = False
+        else:
+            self._prev_hour = val
+
+    def _validate_minute(self, *args):
+        if self._trace_suppress:
+            return
+        val = self.minute_var.get()
+        if not val:
+            self._prev_minute = ""
+            return
+        if not val.isdigit() or int(val) > 59 or len(val) > 2:
+            self._trace_suppress = True
+            self.minute_var.set(self._prev_minute)
+            self._trace_suppress = False
+        else:
+            self._prev_minute = val
 
     def _on_mode_change(self):
         mode = self.mode_var.get()

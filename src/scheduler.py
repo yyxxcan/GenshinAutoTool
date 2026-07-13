@@ -138,15 +138,21 @@ class GenshinMultiAccountScheduler:
         action_row = tk.Frame(add_section, bg="#FFFFFF")
         action_row.pack(fill="x")
 
+        # 输入校验函数
+        vcmd_hour = (self.register(self._validate_hour), '%P')
+        vcmd_minute = (self.register(self._validate_minute), '%P')
+
         tk.Label(action_row, text="时:", bg="#FFFFFF", fg="#2C3E50").pack(side="left")
         self.hour_var = tk.StringVar(value="08")
         tk.Spinbox(action_row, from_=0, to=23, width=3, textvariable=self.hour_var,
-                   format="%02.0f", state="readonly").pack(side="left", padx=(2, 8))
+                   format="%02.0f", validate="key",
+                   validatecommand=vcmd_hour).pack(side="left", padx=(2, 8))
 
         tk.Label(action_row, text="分:", bg="#FFFFFF", fg="#2C3E50").pack(side="left")
         self.minute_var = tk.StringVar(value="00")
         tk.Spinbox(action_row, from_=0, to=59, width=3, textvariable=self.minute_var,
-                   format="%02.0f", state="readonly").pack(side="left", padx=(2, 12))
+                   format="%02.0f", validate="key",
+                   validatecommand=vcmd_minute).pack(side="left", padx=(2, 12))
 
         self.repeat_var = tk.BooleanVar(value=True)
         tk.Checkbutton(action_row, text="每天重复", variable=self.repeat_var,
@@ -182,6 +188,28 @@ class GenshinMultiAccountScheduler:
         path = filedialog.askopenfilename(filetypes=[("EXE 文件", "*.exe")])
         if path:
             self.exe_var.set(path)
+
+    @staticmethod
+    def _validate_hour(P):
+        if P == "":
+            return True
+        if not P.isdigit():
+            return False
+        if len(P) > 2:
+            return False
+        val = int(P)
+        return 0 <= val <= 23
+
+    @staticmethod
+    def _validate_minute(P):
+        if P == "":
+            return True
+        if not P.isdigit():
+            return False
+        if len(P) > 2:
+            return False
+        val = int(P)
+        return 0 <= val <= 59
 
     def _add_schedule(self):
         exe = self.exe_var.get().strip()
