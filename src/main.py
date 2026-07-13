@@ -3173,6 +3173,14 @@ class SchedulerDialog(tk.Toplevel):
         tk.Button(self.weekday_frame, text="全选", command=self._weekday_all,
                   bg="#EEF2F7", fg=COLORS["text"], relief="flat",
                   font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(
+            side="left", padx=(0, 2))
+        tk.Button(self.weekday_frame, text="工作日", command=self._weekday_workday,
+                  bg="#E8F5E9", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(
+            side="left", padx=(0, 2))
+        tk.Button(self.weekday_frame, text="周末", command=self._weekday_weekend,
+                  bg="#FFF3E0", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(
             side="left")
         self.weekday_frame.pack(fill="x", padx=10, pady=(2, 4))
         self.weekday_frame.pack_forget()
@@ -3435,6 +3443,14 @@ class SchedulerDialog(tk.Toplevel):
     def _weekday_none(self):
         for v in self.weekday_vars:
             v.set(False)
+
+    def _weekday_workday(self):
+        for i, v in enumerate(self.weekday_vars):
+            v.set(i < 5)  # 周一至周五 (index 0-4)
+
+    def _weekday_weekend(self):
+        for i, v in enumerate(self.weekday_vars):
+            v.set(i >= 5)  # 周六日 (index 5-6)
 
     def _on_mode_change(self):
         mode = self.mode_var.get()
