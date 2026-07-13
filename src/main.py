@@ -3043,10 +3043,7 @@ class SchedulerDialog(tk.Toplevel):
                 if bbox and bbox[3] > scroll_canvas.winfo_height():
                     scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
-        scroll_canvas.bind("<Enter>",
-                           lambda e: scroll_canvas.bind_all("<MouseWheel>", _scroll_mousewheel))
-        scroll_canvas.bind("<Leave>",
-                           lambda e: scroll_canvas.unbind_all("<MouseWheel>"))
+        content.bind("<MouseWheel>", _scroll_mousewheel)
 
         # --- 添加任务区域 ---
         add_frame = tk.Frame(content, bg="#FFFFFF", relief="flat", bd=1)
@@ -3312,11 +3309,24 @@ class SchedulerDialog(tk.Toplevel):
         self.task_canvas.bind("<Configure>", _on_task_canvas_configure)
 
         def _task_mousewheel(event):
+            """任务列表滚轮：到达边界时传播到外层主滚动区"""
             if not self.task_canvas.winfo_exists():
                 return
             bbox = self.task_canvas.bbox("all")
             if bbox and bbox[3] > self.task_canvas.winfo_height():
-                self.task_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+                delta = -event.delta / 120
+                cur = self.task_canvas.yview()
+                at_top = cur[0] <= 0.001 and delta > 0
+                at_bottom = cur[1] >= 0.999 and delta < 0
+                if not (at_top or at_bottom):
+                    self.task_canvas.yview_scroll(int(delta), "units")
+                    return "break"
+            # 传播到外层主滚动区
+            if hasattr(self, 'main_scroll_canvas') and self.main_scroll_canvas.winfo_exists():
+                mbbox = self.main_scroll_canvas.bbox("all")
+                if mbbox and mbbox[3] > self.main_scroll_canvas.winfo_height():
+                    self.main_scroll_canvas.yview_scroll(
+                        int(-event.delta / 120), "units")
         self.task_canvas.bind("<MouseWheel>", _task_mousewheel)
         self.task_inner.bind("<MouseWheel>", _task_mousewheel)
 
