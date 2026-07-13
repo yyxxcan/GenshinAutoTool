@@ -3241,11 +3241,37 @@ class SchedulerDialog(tk.Toplevel):
         self._acct_vars = {}
         accounts = self.gui.cfg.get("accounts", [])
         if accounts:
-            for acc in accounts:
+            for i, acc in enumerate(accounts):
                 var = tk.BooleanVar(value=False)
                 self._acct_vars[acc["name"]] = var
-                tk.Checkbutton(self.acct_inner, text=acc["name"], variable=var).pack(
-                    anchor="w", padx=4, pady=1)
+
+                row = tk.Frame(self.acct_inner, bg="#FFFFFF")
+                row.pack(fill="x", padx=2, pady=1)
+
+                # 上移按钮（首项占位）
+                if i > 0:
+                    tk.Button(row, text="▲", command=lambda idx=i: self._move_account(idx, -1),
+                              bg="#EEF2F7", fg=COLORS["text_light"], relief="flat",
+                              font=("Microsoft YaHei", 6), padx=1, cursor="hand2", bd=0,
+                              width=2).pack(side="left", padx=(0, 0))
+                else:
+                    tk.Label(row, text="", bg="#FFFFFF", width=2,
+                             font=("Microsoft YaHei", 6)).pack(side="left")
+
+                # 下移按钮（末项占位）
+                if i < len(accounts) - 1:
+                    tk.Button(row, text="▼", command=lambda idx=i: self._move_account(idx, 1),
+                              bg="#EEF2F7", fg=COLORS["text_light"], relief="flat",
+                              font=("Microsoft YaHei", 6), padx=1, cursor="hand2", bd=0,
+                              width=2).pack(side="left")
+                else:
+                    tk.Label(row, text="", bg="#FFFFFF", width=2,
+                             font=("Microsoft YaHei", 6)).pack(side="left")
+
+                tk.Checkbutton(row, text=acc["name"], variable=var,
+                               bg="#FFFFFF", activebackground="#FFFFFF",
+                               font=("Microsoft YaHei", 9)).pack(
+                    side="left", padx=(2, 0))
         else:
             tk.Label(self.acct_inner, text="（暂无账号）", bg="#FFFFFF",
                      fg=COLORS["text_light"], font=("Microsoft YaHei", 9)).pack(anchor="w", padx=4)
@@ -3515,6 +3541,59 @@ class SchedulerDialog(tk.Toplevel):
     def _deselect_all_accts(self):
         for v in self._acct_vars.values():
             v.set(False)
+
+    def _move_account(self, idx, direction):
+        """上移(-1)或下移(+1)账号，同步更新全局配置"""
+        accounts = self.gui.cfg["accounts"]
+        new_idx = idx + direction
+        if 0 <= new_idx < len(accounts):
+            accounts[idx], accounts[new_idx] = accounts[new_idx], accounts[idx]
+            save_config(self.gui.cfg)
+            self._rebuild_acct_list()
+
+    def _rebuild_acct_list(self):
+        """重建账号列表 UI"""
+        for w in self.acct_inner.winfo_children():
+            w.destroy()
+        accounts = self.gui.cfg.get("accounts", [])
+        if accounts:
+            for i, acc in enumerate(accounts):
+                name = acc["name"]
+                var = self._acct_vars.get(name)
+                if var is None:
+                    var = tk.BooleanVar(value=False)
+                    self._acct_vars[name] = var
+
+                row = tk.Frame(self.acct_inner, bg="#FFFFFF")
+                row.pack(fill="x", padx=2, pady=1)
+
+                if i > 0:
+                    tk.Button(row, text="▲", command=lambda idx=i: self._move_account(idx, -1),
+                              bg="#EEF2F7", fg=COLORS["text_light"], relief="flat",
+                              font=("Microsoft YaHei", 6), padx=1, cursor="hand2", bd=0,
+                              width=2).pack(side="left", padx=(0, 0))
+                else:
+                    tk.Label(row, text="", bg="#FFFFFF", width=2,
+                             font=("Microsoft YaHei", 6)).pack(side="left")
+
+                if i < len(accounts) - 1:
+                    tk.Button(row, text="▼", command=lambda idx=i: self._move_account(idx, 1),
+                              bg="#EEF2F7", fg=COLORS["text_light"], relief="flat",
+                              font=("Microsoft YaHei", 6), padx=1, cursor="hand2", bd=0,
+                              width=2).pack(side="left")
+                else:
+                    tk.Label(row, text="", bg="#FFFFFF", width=2,
+                             font=("Microsoft YaHei", 6)).pack(side="left")
+
+                tk.Checkbutton(row, text=name, variable=var,
+                               bg="#FFFFFF", activebackground="#FFFFFF",
+                               font=("Microsoft YaHei", 9)).pack(
+                    side="left", padx=(2, 0))
+        else:
+            tk.Label(self.acct_inner, text="（暂无账号）", bg="#FFFFFF",
+                     fg=COLORS["text_light"], font=("Microsoft YaHei", 9)).pack(anchor="w", padx=4)
+
+        self.after(50, self._update_acct_scrollbar)
 
     def _format_schedule_desc(self, s):
         accts = ", ".join(s.get("accounts", []))
