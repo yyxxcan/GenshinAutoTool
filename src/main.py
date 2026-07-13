@@ -2943,10 +2943,10 @@ class CalendarDialog(tk.Toplevel):
 
 class SchedulerDialog(tk.Toplevel):
     WEEKDAY_NAMES = ["一", "二", "三", "四", "五", "六", "日"]
-    QUICK_TIMES = [("早6点", "06", "00"), ("早8点", "08", "00"), ("早10点", "10", "00"),
+    QUICK_TIMES = [("凌晨0", "00", "00"), ("凌晨2", "02", "00"), ("凌晨4", "04", "00"),
+                   ("早6点", "06", "00"), ("早8点", "08", "00"), ("早10点", "10", "00"),
                    ("午12点", "12", "00"), ("下2点", "14", "00"), ("下4点", "16", "00"),
-                   ("晚6点", "18", "00"), ("晚8点", "20", "00"), ("晚10点", "22", "00"),
-                   ("凌晨4", "04", "00")]
+                   ("晚6点", "18", "00"), ("晚8点", "20", "00"), ("晚10点", "22", "00")]
 
     def __init__(self, parent, gui):
         super().__init__(parent)
@@ -3075,11 +3075,11 @@ class SchedulerDialog(tk.Toplevel):
         q2 = tk.Frame(add_frame, bg="#FFFFFF")
         q2.pack(fill="x", padx=10, pady=(0, 2))
         for i, (label, h, m) in enumerate(self.QUICK_TIMES):
-            parent = q1 if i < 5 else q2
+            parent = q1 if i < 6 else q2
             tk.Button(parent, text=label,
                       command=lambda hh=h, mm=m: self._set_time(hh, mm),
                       bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                      font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
+                      font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 5))
 
         # 时间输入 + 微调同行
         t_row = tk.Frame(add_frame, bg="#FFFFFF")
@@ -3089,7 +3089,7 @@ class SchedulerDialog(tk.Toplevel):
         tk.Button(t_row, text="◀", command=lambda: self._adj_hour(-1),
                   bg="#EEF2F7", fg=COLORS["text"], relief="flat",
                   font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
-                  width=2).pack(side="left", padx=(0, 1))
+                  width=2).pack(side="left", padx=(0, 2))
         self.hour_var = tk.StringVar(value="08")
         ttk.Combobox(t_row, textvariable=self.hour_var, width=3,
                      values=[f"{h:02d}" for h in range(24)],
@@ -3099,13 +3099,13 @@ class SchedulerDialog(tk.Toplevel):
                   font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
                   width=2).pack(side="left")
         tk.Label(t_row, text="时", bg="#FFFFFF", fg=COLORS["text"],
-                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 6))
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 8))
 
         # 分钟区
         tk.Button(t_row, text="◀", command=lambda: self._adj_minutes(-1),
                   bg="#EEF2F7", fg=COLORS["text"], relief="flat",
                   font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
-                  width=2).pack(side="left", padx=(0, 1))
+                  width=2).pack(side="left", padx=(0, 2))
         self.minute_var = tk.StringVar(value="00")
         ttk.Combobox(t_row, textvariable=self.minute_var, width=3,
                      values=[f"{m:02d}" for m in range(60)],
@@ -3115,24 +3115,24 @@ class SchedulerDialog(tk.Toplevel):
                   font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
                   width=2).pack(side="left")
         tk.Label(t_row, text="分", bg="#FFFFFF", fg=COLORS["text"],
-                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 4))
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 6))
 
         # 分钟快速加减
         tk.Button(t_row, text="-5", command=lambda: self._adj_minutes(-5),
                   bg="#FDE8E8", fg=COLORS["text"], relief="flat",
                   font=("Microsoft YaHei", 7), padx=2, cursor="hand2", bd=0,
-                  width=2).pack(side="left", padx=(0, 1))
+                  width=2).pack(side="left", padx=(0, 2))
         tk.Button(t_row, text="+5", command=lambda: self._adj_minutes(5),
                   bg="#E8F5E9", fg=COLORS["text"], relief="flat",
                   font=("Microsoft YaHei", 7), padx=2, cursor="hand2", bd=0,
-                  width=2).pack(side="left", padx=(0, 8))
+                  width=2).pack(side="left", padx=(0, 10))
 
         # 分钟跳转
         for m, name in [(0, "整点"), (15, "一刻"), (30, "半点"), (45, "三刻")]:
             tk.Button(t_row, text=name, command=lambda mm=m: self._set_minute(mm),
                       bg="#E8F5E9" if m else "#EEF2F7", fg=COLORS["text"],
                       relief="flat", font=("Microsoft YaHei", 8), padx=5,
-                      cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
+                      cursor="hand2", bd=0).pack(side="left", padx=(0, 5))
 
         self._trace_suppress = False
         self._prev_hour = self.hour_var.get()
@@ -3179,7 +3179,7 @@ class SchedulerDialog(tk.Toplevel):
             tk.Button(wd_row2, text=text, command=cmd,
                       bg=bg, fg=COLORS["text"], relief="flat",
                       font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(
-                side="left", padx=(0, 4))
+                side="left", padx=(0, 6))
 
         self.weekday_frame.pack(fill="x", padx=10, pady=(2, 4))
         self.weekday_frame.pack_forget()
