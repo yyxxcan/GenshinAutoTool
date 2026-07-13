@@ -47,8 +47,14 @@ Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-; 主程序及所有依赖文件（onedir 打包产物）
-Source: "dist_onedir\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 主程序及依赖（排除配置文件，避免升级覆盖用户数据）
+Source: "dist_onedir\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "config.json"
+
+; 配置文件仅首次安装时复制（升级不覆盖）
+Source: "dist_onedir\{#MyAppName}\config.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
+
+; 调度配置文件仅首次安装时复制（升级不覆盖）
+Source: "dist_onedir\{#MyAppName}\scheduler_config.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
 
 ; 可选：附加说明文件
 ; Source: "使用说明.md"; DestDir: "{app}"; Flags: ignoreversion

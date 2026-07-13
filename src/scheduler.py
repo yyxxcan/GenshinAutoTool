@@ -18,6 +18,8 @@ from tkinter import ttk, messagebox, filedialog
 SCRIPT_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
 CONFIG_PATH = SCRIPT_DIR / "scheduler_config.json"
 
+_scheduler_lock = threading.Lock()
+
 # ============================================================
 # 配置管理
 # ============================================================
@@ -27,8 +29,9 @@ def load_config():
         "schedules": []
     }
     if CONFIG_PATH.is_file():
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            user_cfg = json.load(f)
+        with _scheduler_lock:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                user_cfg = json.load(f)
         for key, default_val in defaults.items():
             if key not in user_cfg:
                 user_cfg[key] = default_val
@@ -36,8 +39,9 @@ def load_config():
     return defaults
 
 def save_config(cfg):
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    with _scheduler_lock:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 # ============================================================
 # 主窗口

@@ -2983,18 +2983,16 @@ class SchedulerDialog(tk.Toplevel):
                        command=self._toggle_auto_shutdown).pack(
             side="right", padx=(0, 10))
 
-        all_enabled = all(s.get("enabled", True) for s in self.cfg["schedules"])
-        btn_color = "#E74C3C" if (self.gui.scheduler_running and all_enabled) else "#52C41A"
-        btn_text = "停止定时器" if (self.gui.scheduler_running and all_enabled) else "一键启动全部"
-        self.toggle_btn = tk.Button(top_bar, text=btn_text, command=self._toggle,
-                                    bg=btn_color, fg="#FFFFFF",
-                                    activebackground="#C0392B" if (self.gui.scheduler_running and all_enabled) else "#389E0D",
+        self.toggle_btn = tk.Button(top_bar, text="定时器", command=self._toggle,
+                                    bg="#52C41A", fg="#FFFFFF",
+                                    activebackground="#389E0D",
                                     relief="flat", font=("Microsoft YaHei", 9),
                                     padx=14, pady=2, cursor="hand2", bd=0)
         self.toggle_btn.pack(side="right", padx=(0, 6))
 
         self._build()
         self._center()
+        self.refresh_btn()
 
     def _center(self):
         self.update_idletasks()
@@ -3247,23 +3245,49 @@ class SchedulerDialog(tk.Toplevel):
         self._acct_rows = []  # 拖拽排序用
         if accounts:
             for i, acc in enumerate(accounts):
+                name = acc["name"]
                 var = tk.BooleanVar(value=False)
-                self._acct_vars[acc["name"]] = var
+                self._acct_vars[name] = var
 
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=f"    {acc['name']}", variable=var,
-                                    bg="#FFFFFF", activebackground="#FFFFFF",
-                                    font=("Microsoft YaHei", 9))
-                cb.pack(side="left", padx=(4, 0))
+                # 勾选标记 Label
+                check_label = tk.Label(row, text="○", width=2, bg="#FFFFFF",
+                                       fg=COLORS["primary"], font=("", 12))
+                check_label.pack(side="left", padx=(8, 4))
 
-                self._acct_items.append((acc["name"], var, cb))
+                # 账号名 Label
+                name_label = tk.Label(row, text=name, bg="#FFFFFF", anchor="w",
+                                      font=("Microsoft YaHei", 9))
+                name_label.pack(side="left", padx=(4, 0))
+
+                # 填充空白区域
+                fill_label = tk.Label(row, text="", bg="#FFFFFF", cursor="hand2")
+                fill_label.pack(side="left", fill="both", expand=True)
+
                 var.trace_add("write", lambda *a: self._refresh_acct_labels())
 
-                # 整行可拖拽
-                for w in (row, cb):
-                    w.bind("<Button-1>", lambda e, idx=i: self._acct_drag_start(e, idx))
+                self._acct_items.append((name, var, check_label, name_label))
+
+                # 点击释放时切换勾选（仅在未拖拽时生效）
+                def make_click_handler(_var=var, _cl=check_label):
+                    def _on_release(event):
+                        if not self._acct_drag_data.get("dragging", False):
+                            _var.set(not _var.get())
+                            _cl.config(text="✓" if _var.get() else "○")
+                            self._refresh_acct_labels()
+                    return _on_release
+
+                # 按下列队拖拽起始
+                def make_drag_handler(_idx=i):
+                    def _handler(event):
+                        self._acct_drag_start(event, _idx)
+                    return _handler
+
+                for w in (row, check_label, name_label, fill_label):
+                    w.bind("<Button-1>", make_drag_handler())
+                    w.bind("<ButtonRelease-1>", make_click_handler())
 
                 self._acct_rows.append(row)
 
@@ -3622,12 +3646,23 @@ class SchedulerDialog(tk.Toplevel):
         if not self._acct_items:
             return
         seq = 1
-        for name, var, cb in self._acct_items:
-            if var.get():
-                cb.config(text=f"  {seq}. {name}")
+        for item in self._acct_items:
+            name, var = item[0], item[1]
+            name_label = item[3]
+            if len(item) >= 3:
+                check_label = item[2]
+                if var.get():
+                    check_label.config(text="✓")
+                    name_label.config(text=f"  {seq}. {name}")
+                    seq += 1
+                else:
+                    check_label.config(text="○")
+                    name_label.config(text=f"    {name}")
+            elif var.get():
+                name_label.config(text=f"  {seq}. {name}")
                 seq += 1
             else:
-                cb.config(text=f"    {name}")
+                name_label.config(text=f"    {name}")
 
     def _rebuild_acct_list(self):
         """重建账号列表 UI（保留勾选状态）"""
@@ -3648,15 +3683,41 @@ class SchedulerDialog(tk.Toplevel):
                 row = tk.Frame(self.acct_inner, bg="#FFFFFF", cursor="hand2")
                 row.pack(fill="x", padx=4, pady=(1, 0))
 
-                cb = tk.Checkbutton(row, text=f"    {name}", variable=var,
-                                    bg="#FFFFFF", activebackground="#FFFFFF",
-                                    font=("Microsoft YaHei", 9))
-                cb.pack(side="left", padx=(4, 0))
+                # 勾选标记 Label
+                check_label = tk.Label(row, text="✓" if var.get() else "○",
+                                       width=2, bg="#FFFFFF", fg=COLORS["primary"],
+                                       font=("", 12))
+                check_label.pack(side="left", padx=(8, 4))
 
-                self._acct_items.append((name, var, cb))
+                # 账号名 Label
+                name_label = tk.Label(row, text=name, bg="#FFFFFF", anchor="w",
+                                      font=("Microsoft YaHei", 9))
+                name_label.pack(side="left", padx=(4, 0))
 
-                for w in (row, cb):
-                    w.bind("<Button-1>", lambda e, idx=i: self._acct_drag_start(e, idx))
+                # 填充空白区域，确保右侧空白也可点击
+                fill_label = tk.Label(row, text="", bg="#FFFFFF", cursor="hand2")
+                fill_label.pack(side="left", fill="both", expand=True)
+
+                # 点击释放时切换勾选（仅在未拖拽时生效）
+                def make_click_handler(_var=var, _cl=check_label):
+                    def _on_release(event):
+                        if not self._acct_drag_data.get("dragging", False):
+                            _var.set(not _var.get())
+                            _cl.config(text="✓" if _var.get() else "○")
+                            self._refresh_acct_labels()
+                    return _on_release
+
+                self._acct_items.append((name, var, check_label, name_label))
+
+                # 按下列队拖拽起始
+                def make_drag_handler(_idx=i):
+                    def _handler(event):
+                        self._acct_drag_start(event, _idx)
+                    return _handler
+
+                for w in (row, check_label, name_label, fill_label):
+                    w.bind("<Button-1>", make_drag_handler())
+                    w.bind("<ButtonRelease-1>", make_click_handler())
 
                 self._acct_rows.append(row)
 
@@ -3698,9 +3759,11 @@ class SchedulerDialog(tk.Toplevel):
         return desc
 
     def _load_list(self):
+        # 重新加载配置以同步托盘等外部变更
+        self.cfg = load_scheduler_config()
+        self._task_vars = []
         for w in self.task_inner.winfo_children():
             w.destroy()
-        self._task_vars = []
 
         if not self.cfg["schedules"]:
             tk.Label(self.task_inner, text="（暂无任务）", bg="#FFFFFF",
@@ -3739,8 +3802,8 @@ class SchedulerDialog(tk.Toplevel):
                     self.cfg["schedules"][idx]["enabled"] = new_state
                     save_scheduler_config(self.cfg)
                     # 手动启用单个任务时，若线程未运行则自动启动
-                    if new_state and not self.gui.scheduler_running:
-                        self.gui.scheduler_running = True
+                    if new_state and self.gui.scheduler_event.is_set():
+                        self.gui.scheduler_event.clear()
                         self.gui.scheduler_thread = threading.Thread(
                             target=self.gui._scheduler_loop, daemon=True)
                         self.gui.scheduler_thread.start()
@@ -3750,7 +3813,7 @@ class SchedulerDialog(tk.Toplevel):
                         all_disabled = all(not sch.get("enabled", True)
                                            for sch in self.cfg["schedules"])
                         if all_disabled:
-                            self.gui.scheduler_running = False
+                            self.gui.scheduler_event.set()
                             self.gui._log("定时器已停止（所有任务均已停用）")
                     self._load_list()
                     self._update_status()
@@ -3775,6 +3838,8 @@ class SchedulerDialog(tk.Toplevel):
         self.after(50, self._update_main_scrollbar)
 
     def _add_schedule(self):
+        # 重新加载配置以同步托盘等外部变更
+        self.cfg = load_scheduler_config()
         selected = [name for name, var in self._acct_vars.items() if var.get()]
         if not selected:
             messagebox.showwarning("提示", "请至少选择一个账号", parent=self)
@@ -3796,6 +3861,8 @@ class SchedulerDialog(tk.Toplevel):
             "scheduler_groups": self.scheduler_var.get().strip(),
             "enabled": True,
         }
+        import uuid
+        schedule["id"] = uuid.uuid4().hex[:8]
 
         if mode == "once":
             date_str = self.date_var.get().strip()
@@ -3831,23 +3898,48 @@ class SchedulerDialog(tk.Toplevel):
         self.cfg["schedules"].append(schedule)
         save_scheduler_config(self.cfg)
 
+        # 添加任务后自动启动调度器（如果有启用任务且调度器未运行）
+        any_enabled = any(s.get("enabled", True) for s in self.cfg["schedules"])
+        if any_enabled and self.gui.scheduler_event.is_set():
+            self.gui.scheduler_event.clear()
+            self.gui.scheduler_thread = threading.Thread(
+                target=self.gui._scheduler_loop, daemon=True)
+            self.gui.scheduler_thread.start()
+            self.gui._log("定时器已自动启动")
+
         self._load_list()
         self.status_var.set("已添加")
         self._update_status()
         self.refresh_btn()
+        if self.gui.tray:
+            self.gui._rebuild_tray_menu()
 
     def _delete_selected(self):
-        indices = [i for i, v in enumerate(self._task_vars) if v.get()]
-        if not indices:
+        # 收集勾选任务的 ID（基于当前快照）
+        checked_ids = set()
+        for i, v in enumerate(self._task_vars):
+            if v.get() and i < len(self.cfg["schedules"]):
+                sid = self.cfg["schedules"][i].get("id")
+                if sid:
+                    checked_ids.add(sid)
+        if not checked_ids:
             return
-        if not messagebox.askyesno("确认删除", f"确定删除 {len(indices)} 个任务？", parent=self):
+        if not messagebox.askyesno("确认删除", f"确定删除 {len(checked_ids)} 个任务？", parent=self):
             return
-        for idx in sorted(indices, reverse=True):
-            self.cfg["schedules"].pop(idx)
+        # 重新加载配置以同步托盘等外部变更，然后用 ID 精确删除
+        self.cfg = load_scheduler_config()
+        self.cfg["schedules"] = [s for s in self.cfg["schedules"]
+                                 if s.get("id") not in checked_ids]
         save_scheduler_config(self.cfg)
         self._load_list()
+        any_enabled = any(s.get("enabled", True) for s in self.cfg["schedules"])
+        if not any_enabled and not self.gui.scheduler_event.is_set():
+            self.gui.scheduler_event.set()
+            self.gui._log("定时器已停止（所有任务已删除或停用）")
+            if self.gui.tray:
+                self.gui._rebuild_tray_menu()
         self.refresh_btn()
-        self.status_var.set(f"已删除 {len(indices)} 个任务")
+        self.status_var.set(f"已删除 {len(checked_ids)} 个任务")
         self._update_status()
 
     def _toggle_select_all(self):
@@ -3860,8 +3952,10 @@ class SchedulerDialog(tk.Toplevel):
             v.set(new_val)
 
     def _toggle(self):
+        # 重新加载配置以同步托盘等外部变更
+        self.cfg = load_scheduler_config()
         all_enabled = all(s.get("enabled", True) for s in self.cfg["schedules"])
-        if not self.gui.scheduler_running or not all_enabled:
+        if self.gui.scheduler_event.is_set() or not all_enabled:
             if not self.cfg["schedules"]:
                 messagebox.showwarning("警告", "没有设置任何定时任务", parent=self)
                 return
@@ -3869,7 +3963,13 @@ class SchedulerDialog(tk.Toplevel):
             for s in self.cfg["schedules"]:
                 s["enabled"] = True
             save_scheduler_config(self.cfg)
-            self.gui.scheduler_running = True
+            # 先停止旧线程（如果存在）
+            if not self.gui.scheduler_event.is_set():
+                self.gui.scheduler_event.set()
+                # 等待旧线程退出，最多 2 秒
+                if self.gui.scheduler_thread and self.gui.scheduler_thread.is_alive():
+                    self.gui.scheduler_thread.join(timeout=2)
+            self.gui.scheduler_event.clear()
             self.gui.scheduler_thread = threading.Thread(target=self.gui._scheduler_loop, daemon=True)
             self.gui.scheduler_thread.start()
             self.gui._log("定时器已启动（一键启用全部任务）")
@@ -3881,7 +3981,7 @@ class SchedulerDialog(tk.Toplevel):
             if self.gui.tray:
                 self.gui._rebuild_tray_menu()
         else:
-            self.gui.scheduler_running = False
+            self.gui.scheduler_event.set()
             self.gui._log("定时器已停止")
             self._load_list()
             self.refresh_btn()
@@ -3905,17 +4005,24 @@ class SchedulerDialog(tk.Toplevel):
         self.status_var.set(f"已{status}自动关机")
 
     def _update_status(self):
+        # 重新加载配置以同步托盘等外部变更
+        self.cfg = load_scheduler_config()
         total = len(self.cfg["schedules"])
         enabled = sum(1 for s in self.cfg["schedules"] if s.get("enabled", True))
-        if self.gui.scheduler_running:
+        if not self.gui.scheduler_event.is_set():
             self.status_var.set(f"运行中 | {enabled}/{total} 个任务已启用")
         else:
             self.status_var.set(f"已停止 | {enabled}/{total} 个任务已启用" if total else "暂无任务")
 
     def refresh_btn(self):
+        # 重新加载配置以同步托盘等外部变更
+        self.cfg = load_scheduler_config()
         all_enabled = all(s.get("enabled", True) for s in self.cfg["schedules"])
-        if self.gui.scheduler_running and all_enabled:
+        running = not self.gui.scheduler_event.is_set()
+        if running and all_enabled:
             self.toggle_btn.config(text="停止定时器", bg="#E74C3C", activebackground="#C0392B")
+        elif running and not all_enabled:
+            self.toggle_btn.config(text="启用全部任务", bg="#FA8C16", activebackground="#D46B08")
         else:
             self.toggle_btn.config(text="一键启动全部", bg="#52C41A", activebackground="#389E0D")
         self._update_status()
@@ -3945,7 +4052,7 @@ class GenshinMultiAccountToolGUI:
         self.paused = False
 
         # 调度器相关（孤儿方法需要）
-        self.scheduler_running = False
+        self.scheduler_event = threading.Event()  # set=停止, clear=运行
         self.scheduler_thread = None
         self._shutdown_pending = False
 
@@ -4510,14 +4617,16 @@ class GenshinMultiAccountToolGUI:
 
     def _open_scheduler(self):
         """打开定时计划对话框"""
-        SchedulerDialog(self.root, self)
+        self.scheduler_dialog = SchedulerDialog(self.root, self)
 
     def _auto_start_scheduler(self):
         """开机自启动：静默启动定时器（不弹警告）"""
         cfg = load_scheduler_config()
         if not cfg.get("schedules"):
             return  # 没有任务，不启动
-        self.scheduler_running = True
+        if not self.scheduler_event.is_set():
+            return  # 调度器已在运行
+        self.scheduler_event.clear()
         self.scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self.scheduler_thread.start()
         # 开机自启 → 最小化到托盘
@@ -4528,9 +4637,9 @@ class GenshinMultiAccountToolGUI:
         """定时器后台线程：每分钟检查一次时间，到点直接启动主程序一条龙
         支持三种模式: daily(每天), weekly(每周), once(一次性)
         """
-        last_triggered = {}  # key=任务索引, value=最后触发的日期
+        last_triggered = {}  # key=schedule id, value=最后触发的日期
 
-        while self.scheduler_running:
+        while not self.scheduler_event.wait(60):
             cfg = load_scheduler_config()
             now = datetime.now()
             current_time = now.strftime("%H:%M")
@@ -4561,7 +4670,7 @@ class GenshinMultiAccountToolGUI:
                     wds = schedule.get("weekdays", [])
                     if current_weekday not in wds:
                         continue
-                    if last_triggered.get(i) == current_date:
+                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
                         continue
 
                 # ---- 指定日期模式 ----
@@ -4569,15 +4678,15 @@ class GenshinMultiAccountToolGUI:
                     sched_dates = schedule.get("dates", [])
                     if current_date not in sched_dates:
                         continue
-                    if last_triggered.get(i) == current_date:
+                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
                         continue
 
                 # ---- 每天模式 ----
                 else:  # daily
-                    if last_triggered.get(i) == current_date:
+                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
                         continue
 
-                last_triggered[i] = current_date
+                last_triggered[schedule.get("id", str(i))] = current_date
 
                 accts = schedule.get("accounts", [])
                 sched_groups = schedule.get("scheduler_groups", "")
@@ -4601,8 +4710,6 @@ class GenshinMultiAccountToolGUI:
                     self._start()
 
                 self.root.after(0, trigger)
-
-            time.sleep(60)
 
     def _start(self):
         sel = self._get_selected()
@@ -4942,7 +5049,7 @@ class GenshinMultiAccountToolGUI:
         """退出程序：先注销托盘图标，再销毁窗口，避免幽灵图标。"""
         global _global_tray
         self._quitting = True
-        self.scheduler_running = False
+        self.scheduler_event.set()
         self.running = False
         if self.stop_event:
             self.stop_event.set()
@@ -5019,10 +5126,16 @@ class GenshinMultiAccountToolGUI:
     def _tray_show_window(self, icon=None, item=None):
         self._pending_action = "show_window"
 
+    def _refresh_scheduler_ui(self):
+        """刷新定时计划对话框 UI（供托盘回调调用）"""
+        if hasattr(self, 'scheduler_dialog') and self.scheduler_dialog and self.scheduler_dialog.winfo_exists():
+            self.scheduler_dialog._load_list()
+            self.scheduler_dialog.refresh_btn()
+
     def _tray_scheduler_toggle(self):
         def _toggle():
-            if self.scheduler_running:
-                self.scheduler_running = False
+            if not self.scheduler_event.is_set():
+                self.scheduler_event.set()
                 self._log("定时器已停止")
             else:
                 cfg = load_scheduler_config()
@@ -5033,11 +5146,12 @@ class GenshinMultiAccountToolGUI:
                 for s in cfg["schedules"]:
                     s["enabled"] = True
                 save_scheduler_config(cfg)
-                self.scheduler_running = True
+                self.scheduler_event.clear()
                 self.scheduler_thread = threading.Thread(
                     target=self._scheduler_loop, daemon=True)
                 self.scheduler_thread.start()
                 self._log("定时器已启动（一键启用全部任务）")
+            self._refresh_scheduler_ui()
         self.root.after(0, _toggle)
 
     def _tray_cancel_shutdown(self):
@@ -5090,16 +5204,17 @@ class GenshinMultiAccountToolGUI:
                     break
             save_scheduler_config(cfg)
             has_enabled = any(s.get("enabled", True) for s in cfg["schedules"])
-            if has_enabled and not self.scheduler_running:
-                self.scheduler_running = True
+            if has_enabled and self.scheduler_event.is_set():
+                self.scheduler_event.clear()
                 self.scheduler_thread = threading.Thread(
                     target=self._scheduler_loop, daemon=True)
                 self.scheduler_thread.start()
-                self._log("定时器已启动（托盘启用任务）")
-            elif not has_enabled and self.scheduler_running:
-                self.scheduler_running = False
-                self._log("定时器已停止（所有任务均已停用）")
+                self.root.after(0, lambda: self._log("定时器已启动（托盘启用任务）"))
+            elif not has_enabled and not self.scheduler_event.is_set():
+                self.scheduler_event.set()
+                self.root.after(0, lambda: self._log("定时器已停止（所有任务均已停用）"))
             self._pending_rebuild = True
+            self.root.after(0, self._refresh_scheduler_ui)
 
         return toggle
 
@@ -5111,12 +5226,18 @@ class GenshinMultiAccountToolGUI:
         for s in cfg["schedules"]:
             s["enabled"] = True
         save_scheduler_config(cfg)
-        self.scheduler_running = True
+        # 先停止旧线程（如果存在）
+        if not self.scheduler_event.is_set():
+            self.scheduler_event.set()
+            if self.scheduler_thread and self.scheduler_thread.is_alive():
+                self.scheduler_thread.join(timeout=2)
+        self.scheduler_event.clear()
         self.scheduler_thread = threading.Thread(
             target=self._scheduler_loop, daemon=True)
         self.scheduler_thread.start()
-        self._log("定时器已启动（一键启用全部任务）")
+        self.root.after(0, lambda: self._log("定时器已启动（一键启用全部任务）"))
         self._pending_rebuild = True
+        self.root.after(0, self._refresh_scheduler_ui)
 
     def _tray_stop_all(self, icon, item):
         """全部停用定时任务并停止线程"""
@@ -5124,9 +5245,10 @@ class GenshinMultiAccountToolGUI:
         for s in cfg.get("schedules", []):
             s["enabled"] = False
         save_scheduler_config(cfg)
-        self.scheduler_running = False
-        self._log("定时器已停止（全部任务已停用）")
+        self.scheduler_event.set()
+        self.root.after(0, lambda: self._log("定时器已停止（全部任务已停用）"))
         self._pending_rebuild = True
+        self.root.after(0, self._refresh_scheduler_ui)
 
     def _build_scheduler_submenu(self):
         """动态构建定时器子菜单（每次调用时根据最新状态生成）"""
