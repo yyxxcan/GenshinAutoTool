@@ -3069,70 +3069,66 @@ class SchedulerDialog(tk.Toplevel):
                            command=self._on_mode_change,
                            font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
 
-        # 快捷时间 + 时分选择同行
-        t_row = tk.Frame(add_frame, bg="#FFFFFF")
-        t_row.pack(fill="x", padx=10, pady=(0, 4))
-        tk.Label(t_row, text="时间:", bg="#FFFFFF", fg=COLORS["text_light"],
-                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(0, 4))
-
-        for label, h, m in self.QUICK_TIMES:
-            tk.Button(t_row, text=label,
+        # 快捷时间（两排）
+        q1 = tk.Frame(add_frame, bg="#FFFFFF")
+        q1.pack(fill="x", padx=10, pady=(4, 0))
+        q2 = tk.Frame(add_frame, bg="#FFFFFF")
+        q2.pack(fill="x", padx=10, pady=(0, 2))
+        for i, (label, h, m) in enumerate(self.QUICK_TIMES):
+            parent = q1 if i < 5 else q2
+            tk.Button(parent, text=label,
                       command=lambda hh=h, mm=m: self._set_time(hh, mm),
                       bg="#EEF2F7", fg=COLORS["text"], relief="flat",
                       font=("Microsoft YaHei", 8), padx=6, cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
 
+        # 时间输入 + 微调同行
+        t_row = tk.Frame(add_frame, bg="#FFFFFF")
+        t_row.pack(fill="x", padx=10, pady=(2, 4))
+
+        # 小时区
+        tk.Button(t_row, text="◀", command=lambda: self._adj_hour(-1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left", padx=(0, 1))
         self.hour_var = tk.StringVar(value="08")
         ttk.Combobox(t_row, textvariable=self.hour_var, width=3,
                      values=[f"{h:02d}" for h in range(24)],
-                     state="normal", font=("Microsoft YaHei", 11)).pack(side="left", padx=(8, 0))
+                     state="normal", font=("Microsoft YaHei", 11)).pack(side="left")
+        tk.Button(t_row, text="▶", command=lambda: self._adj_hour(1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left")
         tk.Label(t_row, text="时", bg="#FFFFFF", fg=COLORS["text"],
-                 font=("Microsoft YaHei", 9)).pack(side="left")
-        tk.Label(t_row, text=":", bg="#FFFFFF", fg=COLORS["text"],
-                 font=("Microsoft YaHei", 11, "bold")).pack(side="left", padx=(2, 2))
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 6))
+
+        # 分钟区
+        tk.Button(t_row, text="◀", command=lambda: self._adj_minutes(-1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left", padx=(0, 1))
         self.minute_var = tk.StringVar(value="00")
         ttk.Combobox(t_row, textvariable=self.minute_var, width=3,
                      values=[f"{m:02d}" for m in range(60)],
                      state="normal", font=("Microsoft YaHei", 11)).pack(side="left")
+        tk.Button(t_row, text="▶", command=lambda: self._adj_minutes(1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left")
         tk.Label(t_row, text="分", bg="#FFFFFF", fg=COLORS["text"],
-                 font=("Microsoft YaHei", 9)).pack(side="left")
+                 font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 8))
+
+        # 分钟跳转
+        for m, name in [(0, "整点"), (15, "一刻"), (30, "半点"), (45, "三刻")]:
+            tk.Button(t_row, text=name, command=lambda mm=m: self._set_minute(mm),
+                      bg="#E8F5E9" if m else "#EEF2F7", fg=COLORS["text"],
+                      relief="flat", font=("Microsoft YaHei", 8), padx=5,
+                      cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
 
         self._trace_suppress = False
         self._prev_hour = self.hour_var.get()
         self._prev_minute = self.minute_var.get()
         self.hour_var.trace_add("write", self._validate_hour)
         self.minute_var.trace_add("write", self._validate_minute)
-
-        # 时间微调行
-        mrow = tk.Frame(add_frame, bg="#FFFFFF")
-        mrow.pack(fill="x", padx=10, pady=(4, 6))
-
-        # 小时微调
-        tk.Button(mrow, text="◀时", command=lambda: self._adj_hour(-1),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 7), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 1))
-        tk.Button(mrow, text="时▶", command=lambda: self._adj_hour(1),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 7), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 10))
-
-        # 分钟微调
-        tk.Button(mrow, text="-5", command=lambda: self._adj_minutes(-5),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 1))
-        tk.Button(mrow, text="-1", command=lambda: self._adj_minutes(-1),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 1))
-        tk.Button(mrow, text="+1", command=lambda: self._adj_minutes(1),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 1))
-        tk.Button(mrow, text="+5", command=lambda: self._adj_minutes(5),
-                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
-                  font=("Microsoft YaHei", 8), padx=4, cursor="hand2", bd=0).pack(side="left", padx=(0, 10))
-
-        # 分钟跳转
-        for m, color in [(0, "#EEF2F7"), (15, "#E8F5E9"), (30, "#E8F5E9"), (45, "#E8F5E9")]:
-            tk.Button(mrow, text=f":{m:02d}", command=lambda mm=m: self._set_minute(mm),
-                      bg=color, fg=COLORS["text"], relief="flat",
-                      font=("Microsoft YaHei", 8), padx=5, cursor="hand2", bd=0).pack(side="left", padx=(0, 3))
 
         # 日期（一次性模式）
         self.date_frame = tk.Frame(add_frame, bg="#FFFFFF")
