@@ -1,7 +1,7 @@
 ﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-GenshinMultiAccountTool v5.4 - 原神多账号辅助工具 v5.4 (动态账号版)
+GenshinMultiAccountTool v5.5 - 原神多账号辅助工具 v5.5 (动态账号版)
 ============================================================
 - 天空蓝简约 GUI
 - 动态添加/删除账号，支持胡桃工具箱账号
@@ -10,7 +10,8 @@ GenshinMultiAccountTool v5.4 - 原神多账号辅助工具 v5.4 (动态账号版
 - 实时日志 + 进度 + 即停即止
 """
 
-import os, sys, json, re, time, glob, queue, tempfile, threading, subprocess
+import os, sys, json, re, time, glob, queue, tempfile, threading, subprocess, ctypes
+from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -34,6 +35,8 @@ try:
 except ImportError:
     HAS_UIA = False
 
+import numpy as np
+
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, scrolledtext
 
@@ -48,14 +51,142 @@ except ImportError:
 # 路径常量
 # ============================================================
 SCRIPT_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
+# 嵌入了资源的 PyInstaller 打包：资源文件在临时解压目录 sys._MEIPASS 中
+RESOURCE_DIR = Path(sys._MEIPASS) if getattr(sys, 'frozen', False) else SCRIPT_DIR
 CONFIG_PATH = SCRIPT_DIR / "config.json"
 SCHEDULER_CONFIG_PATH = SCRIPT_DIR / "scheduler_config.json"
+CHECKIN_SCHEDULE_PATH = SCRIPT_DIR / "checkin_config.json"
+TEYVAT_GUIDE_APP_ID_DEFAULT = "27581BTMuli.tauri-genshin_t86f1j5fs8b3t!TEYVATGUIDE"
+
+
+def get_teyvatguide_app_id():
+    """读取 TeyvatGuide 的 AppUserModelId，优先取 config 中的配置，否则用内置默认值"""
+    cfg = load_config()
+    return cfg.get("teyvatguide", {}).get("app_id", "") or TEYVAT_GUIDE_APP_ID_DEFAULT
 LOGS_DIR = SCRIPT_DIR / "logs"
 LOGS_DIR.mkdir(exist_ok=True)
 
 # 以下路径不再硬编码，由 discover_xxx 函数从 config.json 的 bettergi.config 动态推导
 # BETTERGI_USER_DIR = os.path.dirname(cfg["bettergi"]["config"])
 # BETTERGI_ONEDRAGON_DIR = os.path.join(BETTERGI_USER_DIR, "OneDragon")
+
+# ============================================================
+# Win32 全局热键基础设施（RegisterHotKey + 后台消息泵）
+# 使用系统级热键，确保窗口最小化/后台/托盘时均有效
+# ============================================================
+import ctypes
+from ctypes import wintypes
+
+# Win32 常量
+_MOD_ALT = 0x0001
+_MOD_CONTROL = 0x0002
+_MOD_SHIFT = 0x0004
+_MOD_WIN = 0x0008
+_WM_HOTKEY = 0x0312
+
+# 虚拟键码映射（来自 keyboard 库的键名 → VK_CODE）
+_KEY_TO_VK = {
+    # 字母键
+    **{chr(i): i - 32 for i in range(ord('A'), ord('Z') + 1)},  # 'a'→VK_A(0x41)
+    **{chr(i): i - 32 for i in range(ord('a'), ord('z') + 1)},
+    # 数字键
+    **{str(i): 0x30 + i for i in range(10)},
+    # 功能键
+    **{f"f{i}": 0x6F + i for i in range(1, 25)},
+    # 特殊键
+    "space": 0x20, "spacebar": 0x20,
+    "tab": 0x09, "enter": 0x0D, "return": 0x0D,
+    "backspace": 0x08, "esc": 0x1B, "escape": 0x1B,
+    "delete": 0x2E, "del": 0x2E,
+    "insert": 0x2D, "ins": 0x2D,
+    "home": 0x24, "end": 0x23,
+    "pageup": 0x21, "pgup": 0x21,
+    "pagedown": 0x22, "pgdn": 0x22,
+    "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+    "printscreen": 0x2C, "prtsc": 0x2C,
+    "pause": 0x13, "scrolllock": 0x91,
+    "numlock": 0x90, "capslock": 0x14,
+    "apps": 0x5D, "menu": 0x5D,
+    # 符号键
+    "`": 0xC0, "~": 0xC0, "-": 0xBD, "_": 0xBD,
+    "=": 0xBB, "+": 0xBB, "[": 0xDB, "{": 0xDB,
+    "]": 0xDD, "}": 0xDD, "\\": 0xDC, "|": 0xDC,
+    ";": 0xBA, ":": 0xBA, "'": 0xDE, '"': 0xDE,
+    ",": 0xBC, "<": 0xBC, ".": 0xBE, ">": 0xBE,
+    "/": 0xBF, "?": 0xBF,
+    # 小键盘
+    "numpad0": 0x60, "numpad1": 0x61, "numpad2": 0x62, "numpad3": 0x63,
+    "numpad4": 0x64, "numpad5": 0x65, "numpad6": 0x66, "numpad7": 0x67,
+    "numpad8": 0x68, "numpad9": 0x69,
+    "numpad*": 0x6A, "numpad+": 0x6B,
+    "numpad-": 0x6D, "numpad.": 0x6E, "numpad/": 0x6F,
+    "multiply": 0x6A, "add": 0x6B, "subtract": 0x6D, "decimal": 0x6E, "divide": 0x6F,
+}
+
+def _parse_hotkey_str(hotkey_str):
+    """解析 'ctrl+shift+q' → (modifiers_bitmask, vk_code)
+    
+    返回 (mods, vk)，若字符串为空或无法解析则返回 (None, None)。
+    mods 为 MOD_CONTROL|MOD_SHIFT|MOD_ALT|MOD_WIN 的组合。
+    """
+    if not hotkey_str or not hotkey_str.strip():
+        return None, None
+    
+    parts = [p.strip().lower() for p in hotkey_str.split("+")]
+    mods = 0
+    main_key = None
+    
+    for p in parts:
+        if not p:
+            continue
+        if p in ("ctrl", "control"):
+            mods |= _MOD_CONTROL
+        elif p in ("shift",):
+            mods |= _MOD_SHIFT
+        elif p in ("alt",):
+            mods |= _MOD_ALT
+        elif p in ("win", "windows", "cmd", "command"):
+            mods |= _MOD_WIN
+        else:
+            main_key = p
+    
+    if main_key is None:
+        return None, None
+    
+    vk = _KEY_TO_VK.get(main_key)
+    if vk is None and len(main_key) == 1:
+        # 单字符兜底：用 ord 大写
+        vk = ord(main_key.upper())
+    
+    if vk is None:
+        return None, None
+    
+    return mods, vk
+
+
+def _vk_to_keyname(vk_code):
+    """将虚拟键码转为可读键名（反向映射）"""
+    for name, vk in _KEY_TO_VK.items():
+        if vk == vk_code:
+            # 优先返回简短名称
+            if len(name) <= 2:
+                return name.upper() if len(name) == 1 else name
+            return name
+    return f"VK_{vk_code}"
+
+
+def _mods_to_str(mods):
+    """将修饰符位掩码转为 'ctrl+shift+alt' 格式"""
+    parts = []
+    if mods & _MOD_CONTROL:
+        parts.append("ctrl")
+    if mods & _MOD_SHIFT:
+        parts.append("shift")
+    if mods & _MOD_ALT:
+        parts.append("alt")
+    if mods & _MOD_WIN:
+        parts.append("win")
+    return "+".join(parts)
 
 # 全局托盘引用，供 atexit 兜底清理
 _global_tray = None
@@ -94,7 +225,18 @@ COLORS = {
 # 工具函数
 # ============================================================
 
+_config_cache = None
+_config_cache_mtime = 0
+
 def load_config():
+    global _config_cache, _config_cache_mtime
+    try:
+        mtime = os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        mtime = 0
+    if _config_cache is not None and mtime == _config_cache_mtime:
+        return json.loads(json.dumps(_config_cache))
+
     defaults = {
         "accounts": [],
         "bettergi": {
@@ -117,11 +259,28 @@ def load_config():
         },
         "hotkeys": {
             "stop": "ctrl+shift+q",
+            "pause": "ctrl+shift+p",
+            "start": "",
         },
         "uid": {
             "method": "tesseract",
             "bettergi_group": "",
+            "main_world_detect_group": "",
         },
+        "settings": {
+            "auto_minimize": True,
+            "minimize_on_close": True,
+            "auto_shutdown": False,
+            "launch_apps_enabled": False,
+            "launch_apps_after_all": [],
+            "stop_closes_all_processes": True,
+            "checkin_close_app": False,
+            "close_teyvatguide": False,
+            "close_teyvatguide_after_all": True,
+        },
+        "tg_checkin_before_all": False,
+        "checkin_method": "teyvatguide",
+        "checkin_hutao_accounts": [],
     }
 
     if CONFIG_PATH.is_file():
@@ -135,19 +294,40 @@ def load_config():
                 for sub_key, sub_val in default_val.items():
                     if sub_key not in user_cfg[key]:
                         user_cfg[key][sub_key] = sub_val
+        _config_cache = json.loads(json.dumps(user_cfg))
+        _config_cache_mtime = mtime
         return user_cfg
+    _config_cache = json.loads(json.dumps(defaults))
+    _config_cache_mtime = mtime
     return defaults
 
 
 def save_config(cfg):
+    global _config_cache, _config_cache_mtime
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+    try:
+        _config_cache = json.loads(json.dumps(cfg))
+        _config_cache_mtime = os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        _config_cache_mtime = 0
 
 
 # ============================================================
 # 定时器配置管理
 # ============================================================
+_scheduler_cache = None
+_scheduler_cache_mtime = 0
+
 def load_scheduler_config():
+    global _scheduler_cache, _scheduler_cache_mtime
+    try:
+        mtime = os.path.getmtime(SCHEDULER_CONFIG_PATH)
+    except OSError:
+        mtime = 0
+    if _scheduler_cache is not None and mtime == _scheduler_cache_mtime:
+        return json.loads(json.dumps(_scheduler_cache))
+
     defaults = {
         "schedules": []
     }
@@ -157,12 +337,36 @@ def load_scheduler_config():
         for key, default_val in defaults.items():
             if key not in user_cfg:
                 user_cfg[key] = default_val
+        _scheduler_cache = json.loads(json.dumps(user_cfg))
+        _scheduler_cache_mtime = mtime
         return user_cfg
+    _scheduler_cache = json.loads(json.dumps(defaults))
+    _scheduler_cache_mtime = mtime
     return defaults
 
 
 def save_scheduler_config(cfg):
     with open(SCHEDULER_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def load_checkin_schedule():
+    """加载定时签到配置。返回 {"checkins": [], "enabled": False}"""
+    if not os.path.exists(CHECKIN_SCHEDULE_PATH):
+        return {"checkins": [], "enabled": False}
+    try:
+        with open(CHECKIN_SCHEDULE_PATH, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        cfg = {}
+    cfg.setdefault("checkins", [])
+    cfg.setdefault("enabled", False)
+    return cfg
+
+
+def save_checkin_schedule(cfg):
+    """保存定时签到配置"""
+    with open(CHECKIN_SCHEDULE_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
@@ -255,15 +459,27 @@ def discover_scheduler_groups():
     return sorted(groups)
 
 
+_proc_cache = {}
+_proc_cache_time = 0
+
 def find_proc(name):
+    global _proc_cache, _proc_cache_time
+    now = time.time()
+    if now - _proc_cache_time < 1.0:
+        return _proc_cache.get(name.lower(), None)
+    _proc_cache_time = now
+    _proc_cache = {}
     t = name.lower()
+    result = None
     for p in psutil.process_iter(["pid", "name"]):
         try:
             if p.info["name"] and p.info["name"].lower() == t:
-                return p
+                result = p
+                break
         except Exception:
             pass
-    return None
+    _proc_cache[t] = result
+    return result
 
 
 def kill_proc(name, graceful=True, timeout=10):
@@ -297,12 +513,23 @@ def kill_proc(name, graceful=True, timeout=10):
     return find_proc(name) is None
 
 
-def cleanup_all(log_func):
-    log_func("全局清理：关闭所有相关进程...")
+def cleanup_all(log_func, stop_event=None):
+    """全局清理：无条件关闭所有相关进程。
+    stop_event: 可选 threading.Event，设置后中断后续清理并返回 False"""
+    log_func("全局清理：关闭相关进程...")
     for n in GLOBAL_CLEANUP_TARGETS:
+        if stop_event and stop_event.is_set():
+            log_func("用户停止，跳过后续清理")
+            return False
         log_func(f"  关闭 {n}...")
         kill_proc(n, graceful=True)
-    time.sleep(3)
+    # 等待每个进程退出（每进程最多 2 秒）
+    for n in GLOBAL_CLEANUP_TARGETS:
+        t0 = time.time()
+        while time.time() - t0 < 2:
+            if not find_proc(n):
+                break
+            time.sleep(0.3)
     ok = True
     for n in GLOBAL_CLEANUP_TARGETS:
         if find_proc(n):
@@ -428,31 +655,72 @@ def start_msix_app(app_id):
         return False
 
 
+# ==================== 共享窗口遍历辅助函数 ====================
+def _walk_top_windows():
+    """生成器：遍历所有顶层窗口，yield hwnd。避免各处重复 _enum_callback 样板。"""
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.windll.user32
+    hwnds = []
+
+    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+    def _callback(hwnd, _lparam):
+        hwnds.append(hwnd)
+        return True
+
+    user32.EnumWindows(WNDENUMPROC(_callback), 0)
+    for hwnd in hwnds:
+        yield hwnd
+
+
+def _get_window_text(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetWindowTextW(hwnd, buf, 255)
+    return buf.value
+
+
+def _get_class_name(hwnd):
+    buf = ctypes.create_unicode_buffer(256)
+    ctypes.windll.user32.GetClassNameW(hwnd, buf, 255)
+    return buf.value
+
+
+def _is_window_visible(hwnd):
+    return ctypes.windll.user32.IsWindowVisible(hwnd)
+
+
+def _get_proc_name_by_hwnd(hwnd):
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    pid = ctypes.c_ulong()
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    hProc = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not hProc:
+        return ""
+    buf = ctypes.create_unicode_buffer(260)
+    kernel32.QueryFullProcessImageNameW(hProc, 0, buf, ctypes.byref(ctypes.c_ulong(260)))
+    kernel32.CloseHandle(hProc)
+    return buf.value.rsplit("\\", 1)[-1]
+# ==================== 共享窗口遍历辅助函数 结束 ====================
+
+
 def activate_hutao_window():
     """激活胡桃窗口（MSIX 应用启动后默认不可见），用 EnumWindows 找 WinUIDesktopWin32WindowClass"""
     import ctypes
-    from ctypes import wintypes
-
     user32 = ctypes.windll.user32
     results = []
 
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-    def _enum_callback(hwnd, _lparam):
+    for hwnd in _walk_top_windows():
         try:
-            buf = ctypes.create_unicode_buffer(256)
-            user32.GetWindowTextW(hwnd, buf, 255)
-            if not buf.value or "胡桃" not in buf.value:
-                return True
-            cls_buf = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, cls_buf, 255)
-            if cls_buf.value != "WinUIDesktopWin32WindowClass":
-                return True
+            title = _get_window_text(hwnd)
+            if not title or "胡桃" not in title:
+                continue
+            if _get_class_name(hwnd) != "WinUIDesktopWin32WindowClass":
+                continue
             results.append(hwnd)
         except Exception:
             pass
-        return True
-
-    user32.EnumWindows(WNDENUMPROC(_enum_callback), 0)
 
     for hwnd in results:
         if user32.IsWindow(hwnd):
@@ -464,6 +732,130 @@ def activate_hutao_window():
             user32.BringWindowToTop(hwnd)
             return hwnd
     return None
+
+
+def find_and_activate_window_by_title(title_keyword):
+    """按标题关键词查找窗口，找到后 ShowWindow + SetForeground + BringWindowToTop。
+    返回 hwnd 或 None。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    results = []
+
+    for hwnd in _walk_top_windows():
+        if title_keyword in _get_window_text(hwnd):
+            results.append(hwnd)
+
+    for hwnd in results:
+        if user32.IsWindow(hwnd):
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            time.sleep(0.3)
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+            user32.BringWindowToTop(hwnd)
+            return hwnd
+    return None
+
+
+def find_and_activate_window_by_process(proc_name):
+    """按进程名查找顶层可见窗口，找到后 ShowWindow + SetForeground + BringWindowToTop。
+    返回 hwnd 或 None。适用于窗口标题不包含进程关键字的 Tauri 等应用。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    results = []
+
+    for hwnd in _walk_top_windows():
+        try:
+            if not _is_window_visible(hwnd):
+                continue
+            exe_name = _get_proc_name_by_hwnd(hwnd)
+            if exe_name.lower() == proc_name.lower():
+                results.append(hwnd)
+        except Exception:
+            pass
+
+    for hwnd in results:
+        if user32.IsWindow(hwnd):
+            SW_RESTORE = 9
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            time.sleep(0.3)
+            user32.SetForegroundWindow(hwnd)
+            time.sleep(0.3)
+            user32.BringWindowToTop(hwnd)
+            return hwnd
+    return None
+
+
+def minimize_window_by_title(title_keyword):
+    """按标题关键词查找窗口，用 WM_SYSCOMMAND/SC_MINIMIZE 最小化
+    （ShowWindow 对全屏游戏无效），失败则回退到 Win+D 显示桌面。
+    返回 hwnd 或 None。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    results = []
+
+    for hwnd in _walk_top_windows():
+        if title_keyword in _get_window_text(hwnd):
+            results.append(hwnd)
+
+    for hwnd in results:
+        if user32.IsWindow(hwnd):
+            WM_SYSCOMMAND = 0x0112
+            SC_MINIMIZE = 0xF020
+            user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0)
+            time.sleep(0.5)
+            if user32.IsIconic(hwnd):
+                return hwnd
+            break
+
+    VK_LWIN = 0x5B
+    VK_D = 0x44
+    KEYEVENTF_KEYUP = 0x0002
+    user32.keybd_event(VK_LWIN, 0, 0, 0)
+    user32.keybd_event(VK_D, 0, 0, 0)
+    time.sleep(0.3)
+    user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
+    user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+    return results[0] if results else None
+
+
+def minimize_window_by_process(proc_name):
+    """按进程名查找顶层可见窗口，用 WM_SYSCOMMAND/SC_MINIMIZE 最小化。
+    适用于窗口标题不包含进程关键字的 Tauri 等应用。返回 hwnd 或 None。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    results = []
+
+    for hwnd in _walk_top_windows():
+        try:
+            if not _is_window_visible(hwnd):
+                continue
+            exe_name = _get_proc_name_by_hwnd(hwnd)
+            if exe_name.lower() == proc_name.lower():
+                results.append(hwnd)
+        except Exception:
+            pass
+
+    for hwnd in results:
+        if user32.IsWindow(hwnd):
+            WM_SYSCOMMAND = 0x0112
+            SC_MINIMIZE = 0xF020
+            user32.SendMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0)
+            time.sleep(0.5)
+            if user32.IsIconic(hwnd):
+                return hwnd
+            break
+
+    return results[0] if results else None
+
+
+def minimize_genshin_window():
+    """最小化原神游戏窗口，返回是否成功。"""
+    for pat in ["原神", "YuanShen", "Genshin Impact"]:
+        hwnd = minimize_window_by_title(pat)
+        if hwnd:
+            return True
+    return False
 
 
 def send_esc_to_genshin():
@@ -503,76 +895,75 @@ def monitor_bettergi_log(log_date_str, timeout_sec, log_func, stop_event, genshi
         time.sleep(2)
 
     try:
-        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-            f.seek(0, 2)
-            pos = f.tell()
+        f = open(log_path, "r", encoding="utf-8", errors="ignore")
+        f.seek(0, 2)
     except Exception as e:
         log_func(f"无法打开日志: {e}")
         return False
 
     esc_cooldown = 0
-    onedragon_done_line = False  # 检测到"一条龙和配置组任务结束"标志
+    onedragon_done_line = False
 
-    while time.time() - start_t < timeout_sec:
-        if stop_event.is_set():
-            return False
-        time.sleep(3)
+    try:
+        while time.time() - start_t < timeout_sec:
+            if stop_event.is_set():
+                return False
+            time.sleep(3)
 
-        try:
-            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                f.seek(pos)
+            try:
                 new = f.read()
-                pos = f.tell()
-        except Exception:
-            continue
+            except Exception:
+                continue
 
-        # 检测 ESC 阻塞
-        if esc_cooldown <= 0 and ("请自行退出当前界面（ESC）" in new or "按ESC" in new):
-            log_func("[ESC] 检测到阻塞，自动发送 ESC...")
-            send_esc_to_genshin()
-            esc_cooldown = 15
-            time.sleep(2)
+            # 检测 ESC 阻塞
+            if esc_cooldown <= 0 and ("请自行退出当前界面（ESC）" in new or "按ESC" in new):
+                log_func("[ESC] 检测到阻塞，自动发送 ESC...")
+                send_esc_to_genshin()
+                esc_cooldown = 15
+                time.sleep(2)
 
-        if esc_cooldown > 0:
-            esc_cooldown -= 3
+            if esc_cooldown > 0:
+                esc_cooldown -= 3
 
-        if not new:
-            # 无新日志时检测游戏进程是否已退出（BetterGI 可能关闭了游戏）
-            if genshin_proc and not find_proc(genshin_proc):
+            if not new:
+                # 无新日志时检测游戏进程是否已退出（BetterGI 可能关闭了游戏）
+                if genshin_proc and not find_proc(genshin_proc):
+                    elapsed = int(time.time() - start_t)
+                    log_func(f"原神进程已退出，判定一条龙完成 耗时 {elapsed} 秒，5 秒后结束...")
+                    stop_event.wait(5)
+                    return True
+                continue
+
+            # -------- 精确完成判定 --------
+            # 检测「一条龙和配置组任务结束」标志位
+            if "一条龙和配置组任务结束" in new:
+                onedragon_done_line = True
+                log_func("检测到一条龙配置组完成标志，等待任务结束...")
+                # 同一批日志里紧跟"任务结束" → 立即完成
+                if "任务结束" in new:
+                    elapsed = int(time.time() - start_t)
+                    log_func(f"一条龙任务完成 耗时 {elapsed} 秒，5 秒后结束...")
+                    stop_event.wait(5)
+                    return True
+                continue
+
+            # 如果上轮已看到标志，本轮出现"任务结束" → 立即完成
+            if onedragon_done_line and "任务结束" in new:
                 elapsed = int(time.time() - start_t)
-                log_func(f"原神进程已退出，判定一条龙完成 耗时 {elapsed} 秒，10 秒后结束...")
-                time.sleep(10)
+                log_func(f"一条龙任务完成 耗时 {elapsed} 秒，5 秒后结束...")
+                stop_event.wait(5)
                 return True
-            continue
 
-        # -------- 精确完成判定 --------
-        # 检测「一条龙和配置组任务结束」标志位
-        if "一条龙和配置组任务结束" in new:
-            onedragon_done_line = True
-            log_func("检测到一条龙配置组完成标志，等待任务结束...")
-            # 同一批日志里紧跟"任务结束" → 立即完成
+            # -------- 子任务日志（仅供参考，不影响判定） --------
             if "任务结束" in new:
-                elapsed = int(time.time() - start_t)
-                log_func(f"一条龙任务完成 耗时 {elapsed} 秒，10 秒后结束...")
-                time.sleep(10)
-                return True
-            continue
+                log_func("检测到子任务结束")
+            if "任务启动" in new:
+                log_func("检测到新子任务启动")
 
-        # 如果上轮已看到标志，本轮出现"任务结束" → 立即完成
-        if onedragon_done_line and "任务结束" in new:
-            elapsed = int(time.time() - start_t)
-            log_func(f"一条龙任务完成 耗时 {elapsed} 秒，10 秒后结束...")
-            time.sleep(10)
-            return True
-
-        # -------- 子任务日志（仅供参考，不影响判定） --------
-        if "任务结束" in new:
-            log_func("检测到子任务结束")
-        if "任务启动" in new:
-            log_func("检测到新子任务启动")
-
-    log_func(f"任务监控超时（{timeout_sec} 秒）")
-    return False
+        log_func(f"任务监控超时（{timeout_sec} 秒）")
+        return False
+    finally:
+        f.close()
 
 
 def monitor_config_group(log_date_str, group_name, timeout_sec, log_func, stop_event):
@@ -633,9 +1024,59 @@ def monitor_config_group(log_date_str, group_name, timeout_sec, log_func, stop_e
     return False
 
 
+def monitor_main_world_entered(log_date_str, timeout_sec, log_func, stop_event):
+    """
+    监控 BetterGI 日志，等待「检测主界面」脚本输出「已进入游戏主界面」。
+    此方案完全依赖 BetterGI 内部的主界面检测，不再自写截图检测。
+    返回 True 表示成功进入游戏主界面。
+    """
+    log_dir = _get_bettergi_log_dir()
+    log_path = os.path.join(log_dir, f"better-genshin-impact{log_date_str}.log") if log_dir else ""
+    log_func(f"监控 BetterGI 主界面检测: {log_path}")
+    start_t = time.time()
+
+    while not os.path.isfile(log_path):
+        if time.time() - start_t > 30 or stop_event.is_set():
+            return False
+        time.sleep(2)
+
+    try:
+        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+            f.seek(0, 2)
+            pos = f.tell()
+    except Exception as e:
+        log_func(f"无法打开日志: {e}")
+        return False
+
+    keyword = "========== 已进入游戏主界面 =========="
+
+    while time.time() - start_t < timeout_sec:
+        if stop_event.is_set():
+            return False
+        time.sleep(2)
+
+        try:
+            with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(pos)
+                new = f.read()
+                pos = f.tell()
+        except Exception:
+            continue
+
+        if keyword in new:
+            elapsed = int(time.time() - start_t)
+            log_func(f"BetterGI 检测到已进入游戏主界面 耗时 {elapsed} 秒")
+            return True
+
+    log_func(f"主界面检测超时（{timeout_sec} 秒）")
+    return False
+
+
 def wait_proc_appear(name, timeout_sec, log_func, stop_event):
     start_t = time.time()
     last_log = 0
+    fast_steps = 20  # 前 20 次用 0.5s 步进 = 前 10 秒快速轮询
+    step_count = 0
     while time.time() - start_t < timeout_sec:
         if stop_event.is_set():
             return None
@@ -643,11 +1084,13 @@ def wait_proc_appear(name, timeout_sec, log_func, stop_event):
         if p:
             time.sleep(2)
             return p
+        step_count += 1
         now = time.time()
         if now - last_log > 15:
             log_func(f"等待进程 {name}... ({int(now-start_t)}s/{timeout_sec}s)")
             last_log = now
-        time.sleep(3)
+        sleep_time = 0.5 if step_count <= fast_steps else 2.0
+        time.sleep(sleep_time)
     return None
 
 
@@ -663,25 +1106,19 @@ def wait_proc_gone(name, timeout_sec, log_func, stop_event):
 
 
 def find_hutao_window():
-    """用 EnumWindows 找到胡桃真实窗口（WinUIDesktopWin32WindowClass，非 MSIX 容器壳）"""
+    """找到胡桃真实窗口（WinUIDesktopWin32WindowClass，非 MSIX 容器壳）"""
     import ctypes
     from ctypes import wintypes
-
     user32 = ctypes.windll.user32
     results = []
 
-    WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-    def _enum_callback(hwnd, _lparam):
+    for hwnd in _walk_top_windows():
         try:
-            buf = ctypes.create_unicode_buffer(256)
-            user32.GetWindowTextW(hwnd, buf, 255)
-            title = buf.value
+            title = _get_window_text(hwnd)
             if not title or "胡桃" not in title:
-                return True
-            cls_buf = ctypes.create_unicode_buffer(256)
-            user32.GetClassNameW(hwnd, cls_buf, 255)
-            if cls_buf.value != "WinUIDesktopWin32WindowClass":
-                return True
+                continue
+            if _get_class_name(hwnd) != "WinUIDesktopWin32WindowClass":
+                continue
             rect = wintypes.RECT()
             user32.GetWindowRect(hwnd, ctypes.byref(rect))
             results.append({
@@ -693,15 +1130,32 @@ def find_hutao_window():
             })
         except Exception:
             pass
-        return True
 
-    user32.EnumWindows(WNDENUMPROC(_enum_callback), 0)
-
-    # 过滤掉 MSIX 容器壳（5x5 微小窗口），返回真实窗口
     for r in results:
         if r["width"] > 100 and r["height"] > 100:
             return r
     return None
+
+
+def close_window_by_title(title_keyword, log_func=None):
+    """按标题关键词查找窗口，发送 WM_CLOSE 关闭。返回关闭的窗口数。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    WM_CLOSE = 0x0010
+    closed = 0
+    results = []
+
+    for hwnd in _walk_top_windows():
+        if title_keyword in _get_window_text(hwnd):
+            results.append(hwnd)
+
+    for hwnd in results:
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        closed += 1
+
+    if log_func and closed > 0:
+        log_func(f"已关闭 {closed} 个「{title_keyword}」窗口")
+    return closed
 
 
 def click_hutao_start_game(log_func, stop_event):
@@ -766,7 +1220,8 @@ def click_hutao_start_game(log_func, stop_event):
         try:
             if ctrl.Name and keyword in ctrl.Name:
                 return True
-        except: pass
+        except Exception as e:
+            log_func(f"[UIA] 遍历异常: {e}")
         try:
             for child in ctrl.GetChildren():
                 if _has_text_descendant(child, keyword):
@@ -805,7 +1260,8 @@ def click_hutao_start_game(log_func, stop_event):
                     try:
                         if parent.ControlTypeName == "ListItemControl":
                             skip = True
-                    except: pass
+                    except Exception as e:
+                        log_func(f"[UIA] 遍历异常: {e}")
                 if not skip:
                     # 评分：ButtonControl 优先，名字直接匹配加分
                     score = 0
@@ -814,7 +1270,8 @@ def click_hutao_start_game(log_func, stop_event):
                     try:
                         if ctrl.Name and "启动游戏" in ctrl.Name:
                             score += 50
-                    except: pass
+                    except Exception as e:
+                        log_func(f"[UIA] 遍历异常: {e}")
                     # 控件越靠近窗口顶部/右侧加分（排除底部溢出控件）
                     score -= ry  # y 越小越好
                     log_func(f"候选: [{ct}] '{ctrl.Name or ''}' ({r.left},{r.top}) {w}x{h} score={score}")
@@ -825,7 +1282,8 @@ def click_hutao_start_game(log_func, stop_event):
         try:
             for child in ctrl.GetChildren():
                 results.extend(_collect_candidates(child, depth + 1))
-        except: pass
+        except Exception as e:
+            log_func(f"[UIA] 遍历异常: {e}")
         return results
 
     candidates = _collect_candidates(hwnd_ctrl)
@@ -865,22 +1323,15 @@ def click_hutao_start_game(log_func, stop_event):
         except Exception:
             btn.Click()
         time.sleep(0.5)
-        # 第一次点击（可能被弹窗拦截）
         pyautogui.click(cx, cy)
-        log_func("已点击「启动游戏」(第1次)")
+        log_func("已点击「启动游戏」")
         time.sleep(1.5)
-        # 第二次点击（兜底，防止首次被弹窗消费）
-        pyautogui.click(cx, cy)
-        log_func("已点击「启动游戏」(第2次)")
-        time.sleep(2)
         return True
     except Exception as e:
         log_func(f"UIA点击失败，改用鼠标: {e}")
         pyautogui.click(cx, cy)
         time.sleep(1.5)
-        pyautogui.click(cx, cy)
-        time.sleep(2)
-        log_func("已点击「启动游戏」(鼠标双击)")
+        log_func("已点击「启动游戏」(鼠标)")
         return True
     finally:
         pyautogui.FAILSAFE = old_failsafe
@@ -899,7 +1350,9 @@ def _find_hutao_current_account(win, hwnd_ctrl):
 
     candidates = []
 
-    def _scout(ctrl):
+    def _scout(ctrl, depth=0):
+        if depth > 10:
+            return
         try:
             ct = ctrl.ControlTypeName
             name = ctrl.Name or ""
@@ -914,7 +1367,7 @@ def _find_hutao_current_account(win, hwnd_ctrl):
             pass
         try:
             for child in ctrl.GetChildren():
-                _scout(child)
+                _scout(child, depth + 1)
         except Exception:
             pass
 
@@ -1075,18 +1528,85 @@ def verify_and_switch_hutao_account(target_name, log_func, stop_event):
     ok = _click_hutao_account_popup(win, target_name, log_func)
     if ok:
         log_func(f"已切换至「{target_name}」")
+        # 关弹窗 + 点空白取消聚焦
+        try:
+            time.sleep(0.5)
+            _dismiss_confirm_popup(win, log_func)
+            time.sleep(0.5)
+            # 点击窗口空白区域取消聚焦（中心偏右避开侧栏）
+            rect = hwnd_ctrl.BoundingRectangle
+            cx = rect.left + int(rect.width() * 0.7)
+            cy = rect.top + int(rect.height() * 0.5)
+            uia.Click(cx, cy)
+            time.sleep(0.5)
+        except Exception:
+            pass
         return True
 
     return False
 
 
-def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
-    """等待原神真正进入游戏：窗口出现 → 大小稳定 → 白屏→画面色彩检测"""
+def wait_genshin_ready(log_func, stop_event, timeout_sec=300, on_window_appear=None,
+                       loading_button_template=None, on_white_detected=None):
+    """等待原神真正进入游戏：窗口出现 → 大小稳定 → 白屏→画面色彩检测
+    
+    on_window_appear: 可选回调，窗口出现（白屏瞬间）时触发，适合在此启动 BetterGI 等
+    loading_button_template: 大门加载画面右上角关闭按钮模板，用于区分加载画面与游戏世界"""
     import numpy as np
     from PIL import Image
 
+    # 预加载关闭按钮模板
+    _template_arr = None
+    if loading_button_template and os.path.isfile(loading_button_template):
+        try:
+            from PIL import Image as PILImage
+            _template_arr = np.array(PILImage.open(loading_button_template).convert("RGB"), dtype=np.float32)
+            log_func(f"已加载关闭按钮模板 ({_template_arr.shape[1]}x{_template_arr.shape[0]})")
+        except Exception:
+            pass
+
+    def _check_loading_button(screen_arr):
+        """检测大门加载画面特有的关闭按钮（模糊匹配），存在→仍在加载，不存在→已进入游戏"""
+        if _template_arr is None:
+            return False
+        try:
+            th, tw = _template_arr.shape[:2]
+            h, w = screen_arr.shape[:2]
+            # 只搜左下 1/4 区域（底 1/3 × 左 1/3）
+            y0, y1 = max(1, 2 * h // 3), h
+            x0, x1 = 0, max(1, w // 3)
+            roi = screen_arr[y0:y1, x0:x1].astype(np.float32)
+            rh, rw = roi.shape[:2]
+            if rh < th or rw < tw:
+                return False
+            from numpy.lib.stride_tricks import sliding_window_view
+            windows = sliding_window_view(roi, (th, tw, 3)).squeeze()
+            # windows shape: (rh-th+1, rw-tw+1, th, tw, 3)
+            diff = windows - _template_arr
+            mse = np.mean(diff ** 2, axis=(2, 3, 4))
+            return np.min(mse) < 500
+        except Exception:
+            return False
+
     if not HAS_GW:
-        time.sleep(90)
+        log_func("pygetwindow 不可用，使用进程检测方式等待游戏窗口...")
+        for i in range(30):
+            if stop_event.is_set():
+                return False
+            try:
+                result = subprocess.run(
+                    ['tasklist', '/fi', 'imagename eq YuanShen.exe', '/fo', 'csv', '/nh'],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                if 'YuanShen.exe' in result.stdout or 'GenshinImpact.exe' in result.stdout:
+                    log_func("检测到游戏进程，等待窗口稳定...")
+                    time.sleep(5)
+                    return True
+            except Exception:
+                pass
+            stop_event.wait(3)
+        log_func("等待游戏超时（90秒）")
         return True
 
     start_t = time.time()
@@ -1110,10 +1630,16 @@ def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
 
     log_func(f"原神窗口已出现: {win.width}x{win.height}")
 
-    # 阶段2：窗口大小稳定
+    if on_window_appear:
+        try:
+            on_window_appear()
+        except Exception:
+            pass
+
+    # 阶段2：窗口大小稳定（1次确认即可）
     last_size = None
     stable = 0
-    while stable < 3 and (time.time() - start_t < timeout_sec):
+    while stable < 1 and (time.time() - start_t < timeout_sec):
         if stop_event.is_set():
             return False
         time.sleep(6)
@@ -1121,8 +1647,16 @@ def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
             for pat in ["原神", "YuanShen", "Genshin Impact"]:
                 ws = gw.getWindowsWithTitle(pat)
                 if ws:
-                    win = ws[0]
-                    break
+                    # 排除 BetterGI 窗口
+                    win = None
+                    for w in ws:
+                        t = w.title.lower()
+                        if "bettergi" in t or "更好的原神" in w.title:
+                            continue
+                        win = w
+                        break
+                    if win:
+                        break
             if not win:
                 stable = 0
                 continue
@@ -1131,25 +1665,32 @@ def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
                 continue
             if last_size and cur == last_size:
                 stable += 1
-                log_func(f"窗口稳定 {stable}/3: {cur[0]}x{cur[1]}")
+                log_func(f"窗口稳定: {cur[0]}x{cur[1]}")
             else:
                 stable = 1
                 last_size = cur
         except Exception:
             stable = 0
 
-    if stable < 3:
+    if stable < 1:
         return False
 
     # 阶段3：截图色彩检测
-    # 原神流程: 白屏(7元素) → 健康提示 → 白屏(岩元素) → 加载画面 → 游戏
-    # 进入游戏的标志：画面长时间稳定、色彩丰富、白色占比低
+    # 原神加载流程大体是: 白屏 → 复杂画面 → 白屏 → 复杂画面 → 游戏
+    # 实际会有抖动和偏差：连续白屏、连续复杂、跳过一次白屏、持续复杂不变 等
+    # 策略：用"白→彩"相位转换次数捕获整体流程，不要求严格交替
+    # 去抖动(debouce)：连续 N 帧同色才确认相位切换，过滤单帧噪点
+    DEBOUNCE = 2
+    # 详细日志（调试用，默认关闭）
+    # has_template = bool(loading_button_template and os.path.isfile(loading_button_template))
+    # log_func(f"开始截图检测... (模板={'已加载' if has_template else '无'}, 去抖动={DEBOUNCE}帧, 阈值=0.55)")
     log_func("开始截图检测...")
-    was_white = False
-    white_count = 0
-    transition_count = 0
-    stable_count = 0
-    post_enter_stable = 0  # 初步判定进入后，还需持续确认
+    current_phase = None        # 已确认的相位: "white" / "color"
+    phase_frame_count = 0       # 当前相位已确认的持续帧数
+    white_to_color_count = 0    # 白→彩 转换次数
+    pending_phase = None        # 去抖动暂存
+    pending_count = 0
+    _white_triggered = False    # on_white_detected 只触发一次
 
     while time.time() - start_t < timeout_sec:
         if stop_event.is_set():
@@ -1159,8 +1700,16 @@ def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
             for pat in ["原神", "YuanShen", "Genshin Impact"]:
                 ws = gw.getWindowsWithTitle(pat)
                 if ws:
-                    win = ws[0]
-                    break
+                    # 排除 BetterGI 窗口（标题含"更好的原神"/"BetterGI"）
+                    win = None
+                    for w in ws:
+                        t = w.title.lower()
+                        if "bettergi" in t or "更好的原神" in w.title:
+                            continue
+                        win = w
+                        break
+                    if win:
+                        break
             if not win or win.width < 100:
                 time.sleep(5)
                 continue
@@ -1172,41 +1721,79 @@ def wait_genshin_ready(log_func, stop_event, timeout_sec=300):
             img = pyautogui.screenshot(region=region)
             arr = np.array(img, dtype=np.float32)
 
+            # 过滤截图抓帧失败产生的全黑/近黑帧（DirectX 渲染间隙的假帧）
+            if np.mean(arr) < 10:
+                log_func("[跳过] 疑似截图黑帧，忽略")
+                time.sleep(0.3)
+                continue
+
             diff = np.sqrt(np.sum((arr - 255.0) ** 2, axis=2))
             white_ratio = np.mean(diff < 40)
             color_std = float(np.std(arr))
 
-            if white_ratio > 0.55:
-                white_count += 1
-                if not was_white and white_count >= 2:
-                    was_white = True
-                    log_func(f"检测到加载画面 (第{transition_count+1}次, 白色 {white_ratio:.1%})")
-            elif was_white and white_count >= 1:
-                transition_count += 1
-                log_func(f"画面已变化 (第{transition_count}次转换, 白色 {white_ratio:.1%}, 色彩度 {color_std:.0f})")
-                if transition_count >= 2:
-                    # 第2次转换后还需持续确认：连续5帧非白屏 + 色彩度 > 20 才真正进入
-                    post_enter_stable += 1
-                    if post_enter_stable >= 5 and color_std > 20:
-                        time.sleep(2)
-                        log_func("游戏已进入")
-                        return True
-                was_white = False
-                white_count = 0
-            elif transition_count >= 1:
-                # 第2次白屏可能被跳过，用连续非白屏+画面有内容兜底
-                stable_count += 1
-                if stable_count >= 8 and color_std > 25:
-                    time.sleep(2)
-                    log_func("游戏已进入（连续非白屏）")
-                    return True
+            # 迟滞阈值：当前相位用不同门槛，避免个别帧误判导致相位反复横跳
+            if current_phase is None:
+                is_white = white_ratio > 0.55
+            elif current_phase == "white":
+                is_white = white_ratio > 0.3   # 已是白屏，需大幅下降才认为进入彩色
             else:
-                pass
+                is_white = white_ratio > 0.7   # 已是彩色，需大幅上升才认为回到白屏
+            raw_phase = "white" if is_white else "color"
+
+            # # 原始帧数据日志（调试用，默认关闭）
+            # log_func(f"[帧] 白像素比={white_ratio:.3f} 色彩度={color_std:.0f} → raw={raw_phase} "
+            #          f"pending={pending_phase}#{pending_count} current={current_phase}#{phase_frame_count}")
+
+            # --- 去抖动：连续 DEBOUNCE 帧同色才确认相位切换 ---
+            if raw_phase == pending_phase:
+                pending_count += 1
+            else:
+                pending_phase = raw_phase
+                pending_count = 1
+
+            if pending_count < DEBOUNCE:
+                time.sleep(0.3)
+                continue  # 未确认，跳过本帧判定
+
+            # 已确认，更新相位
+            if pending_phase != current_phase:
+                # log_func(f"[相位切换] {current_phase} → {pending_phase} (持续{pending_count}帧确认)")
+                if pending_phase == "color" and current_phase == "white":
+                    white_to_color_count += 1
+                    # log_func(f"第{white_to_color_count}次白→画面转换 (色彩度 {color_std:.0f})")
+                elif pending_phase == "white" and not _white_triggered:
+                    # 首次确认白屏，触发回调（用于启动 BetterGI）
+                    _white_triggered = True
+                    if on_white_detected:
+                        try:
+                            on_white_detected()
+                        except Exception as e:
+                            log_func(f"on_white_detected 回调异常: {e}")
+                current_phase = pending_phase
+                phase_frame_count = pending_count
+            else:
+                phase_frame_count = pending_count
+
+            # --- 进入判定（仅彩色相位） ---
+            if not is_white:
+                if white_to_color_count >= 2:
+                    # log_func(f"[判定] w→c={white_to_color_count}, 稳定色帧={phase_frame_count}, 开始评估是否进入游戏")
+                    if phase_frame_count >= 12:
+                        btn_detected = _check_loading_button(arr)
+                        # log_func(f"[加载按钮检测] 结果={'存在' if btn_detected else '不存'}")
+                        if btn_detected:
+                            log_func("检测到加载画面关闭按钮，继续等待...")
+                            phase_frame_count = 0
+                        else:
+                            # log_func("[截图后等待2秒...]")
+                            time.sleep(2)
+                            log_func("游戏已进入")
+                            return True
 
         except Exception as e:
             log_func(f"截图异常: {e}")
 
-        time.sleep(1)
+        time.sleep(0.3)
 
     log_func("[!] 截图检测超时")
     return False
@@ -1248,8 +1835,11 @@ def ocr_genshin_uid_raw(log_func, stop_event, max_retries=5):
     except ImportError:
         HAS_W32 = False
 
-    # 1. 优先使用 exe 同目录下的便携版 Tesseract（免安装）
-    portable_tess = os.path.join(str(SCRIPT_DIR), "tesseract", "tesseract.exe")
+    # 1. 优先使用便携版 Tesseract（exe 同目录或嵌入资源中的 tesseract-ocr）
+    # 在 --onefile 模式下 tesseract-ocr 不会被嵌入，所以也检查 SCRIPT_DIR
+    portable_tess = os.path.join(str(RESOURCE_DIR), "tesseract-ocr", "tesseract.exe")
+    if not os.path.isfile(portable_tess):
+        portable_tess = os.path.join(str(SCRIPT_DIR), "tesseract-ocr", "tesseract.exe")
     if os.path.isfile(portable_tess):
         pytesseract.pytesseract.tesseract_cmd = portable_tess
     else:
@@ -1261,7 +1851,7 @@ def ocr_genshin_uid_raw(log_func, stop_event, max_retries=5):
             if os.path.isfile(tess_exe):
                 pytesseract.pytesseract.tesseract_cmd = tess_exe
 
-    debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp")
+    debug_dir = os.path.join(str(SCRIPT_DIR), "temp")
     os.makedirs(debug_dir, exist_ok=True)
 
     for attempt in range(max_retries):
@@ -1365,7 +1955,7 @@ def ocr_genshin_uid_raw(log_func, stop_event, max_retries=5):
                     full = pyautogui.screenshot(region=(r[0], r[1], win_w, win_h))
                     full.save(os.path.join(debug_dir, "uid_fullwin.png"))
                     log_func(f"DEBUG: 窗口=({r[0]},{r[1]}) {win_w}x{win_h} UID区域=({uid_l},{uid_t}) {uid_w}x{uid_h}")
-                except:
+                except Exception:
                     pass
 
             # 预处理：灰度 → 提取亮区文字（UID 是白色文字）
@@ -1389,7 +1979,7 @@ def ocr_genshin_uid_raw(log_func, stop_event, max_retries=5):
                             pimg, config=f'--psm {psm} -c tessedit_char_whitelist=0123456789').strip()
                         if txt:
                             all_texts[txt] = all_texts.get(txt, 0) + 1
-                except:
+                except Exception:
                     pass
 
             # 投票选最佳结果
@@ -1415,7 +2005,7 @@ def ocr_genshin_uid_raw(log_func, stop_event, max_retries=5):
                 try:
                     proc_img.save(os.path.join(debug_dir, "uid_proc.png"))
                     img.save(os.path.join(debug_dir, "uid_raw.png"))
-                except:
+                except Exception:
                     pass
 
             for psm in ["7", "13", "6"]:
@@ -1578,7 +2168,7 @@ def start_bettergi_with_args(gi_exe, args):
     """启动 BetterGI 并附加命令行参数，返回 PID 或 None。"""
     try:
         cmd = [gi_exe] + args
-        proc = subprocess.Popen(cmd, creationflags=subprocess.CREATE_NO_WINDOW)
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=subprocess.CREATE_NO_WINDOW)
         return proc.pid
     except Exception as e:
         return None
@@ -1616,12 +2206,13 @@ def verify_genshin_uid(expected_uid, log_func, stop_event, max_retries=5):
 # ============================================================
 
 class WorkerThread(threading.Thread):
-    def __init__(self, accounts, log_queue, stop_event, pause_event):
+    def __init__(self, accounts, log_queue, stop_event, pause_event, exec_lock=None):
         super().__init__(daemon=True)
         self.accounts = accounts  # 账号列表 (dict)
         self.log_queue = log_queue
         self.stop_event = stop_event
         self.pause_event = pause_event  # 暂停事件：set=不暂停, clear=暂停
+        self.exec_lock = exec_lock  # 任务互斥锁
         self.cfg = load_config()
 
     def log(self, msg):
@@ -1641,6 +2232,11 @@ class WorkerThread(threading.Thread):
         finally:
             ctypes.windll.ole32.CoUninitialize()
             self.log_queue.put("__DONE__")
+            if self.exec_lock is not None:
+                try:
+                    self.exec_lock.release()
+                except RuntimeError:
+                    pass  # 锁未被持有或已释放
 
     def _find_account_by_uid(self, recognized_uid):
         """在所有账号中查找匹配 UID 的账号，返回账号字典或 None"""
@@ -1666,15 +2262,38 @@ class WorkerThread(threading.Thread):
         timeout = cfg["monitor"].get("max_wait_seconds", 7200)
         log_date_str = datetime.now().strftime("%Y%m%d")
 
-        if not cleanup_all(self.log):
+        if self.stop_event.is_set():
+            return
+
+        # TeyvatGuide 全局签到（所有任务开始前执行一次）
+        if cfg.get("tg_checkin_before_all", False):
+            self.log("=== TeyvatGuide 全局签到开始 ===")
+            _run_checkin(self.log, self.stop_event)
+            self.log("=== TeyvatGuide 全局签到完成 ===")
+
+        if not cleanup_all(self.log, self.stop_event):
             self.log("[!] 清理失败，请手动关闭后重试")
             return
 
         total = len(self.accounts)
-        executed = set()  # 用 set 记录已执行的账号名，避免重复
+        executed = set()
         prev_type = None
         idx = 0
-        pending = list(self.accounts)  # 待处理列表，UID不匹配时动态调整
+        pending = list(self.accounts)
+
+        # ---- 需求4：扫描胡桃任务数量，决定是否保持胡桃运行 ----
+        hutao_count = sum(1 for a in self.accounts if a.get("type", "direct") == "hutao")
+        keep_hutao_alive = hutao_count >= 2
+        remaining_hutao = hutao_count
+        if keep_hutao_alive:
+            self.log(f"[优化] 检测到 {hutao_count} 个胡桃任务，任务间不关闭胡桃工具箱")
+
+        # ---- 扫描 TG CDP 任务数量，决定是否保持 TeyvatGuide 运行 ----
+        tgcdp_count = sum(1 for a in self.accounts if a.get("type", "direct") == "tg_cdp")
+        keep_tg_alive = tgcdp_count >= 2
+        remaining_tg = tgcdp_count
+        if keep_tg_alive:
+            self.log(f"[优化] 检测到 {tgcdp_count} 个 TG CDP 任务，任务间不关闭 TeyvatGuide")
 
         while pending:
             if self.stop_event.is_set():
@@ -1705,15 +2324,102 @@ class WorkerThread(threading.Thread):
             old_cfg = modify_bettergi_config(gi_config, config_name)
             self.log(f"配置: {old_cfg} -> {config_name}")
 
+            # ---- 启动方式交接规则 ----
+            # 游戏关闭由批次循环的 force_close_game 参数统一控制
+            # 此处只需处理 TG/Hutao 相关的进程清理（非游戏进程）
+            game_alive = find_proc(genshin_proc_name) is not None
+            if prev_type is not None:
+                if prev_type == "tg_cdp" or acc_type == "tg_cdp":
+                    # TG→* 或 *→TG：如果游戏还活着则杀掉（belt and suspenders）
+                    if game_alive:
+                        self.log(f"[过渡] {prev_type}→{acc_type}，关闭游戏进程...")
+                        kill_proc(genshin_proc_name)
+                        time.sleep(2)
+                        game_alive = False
+                elif prev_type == "hutao" or acc_type == "hutao":
+                    # 涉及胡桃的过渡：如果游戏还活着则杀掉
+                    if game_alive:
+                        self.log(f"[过渡] {prev_type}→{acc_type}，关闭游戏进程...")
+                        kill_proc(genshin_proc_name)
+                        time.sleep(2)
+                        game_alive = False
+
+            # 检测游戏是否仍在运行（上一个直接启动任务保留了游戏进程）
+            game_still_running = (prev_type == "direct" and acc_type == "direct" and game_alive)
+            if game_still_running:
+                self.log("[过渡] 直接启动→直接启动，游戏已在运行中，跳过进入检测...")
+
+            # 根据下一个任务类型决定是否强制关闭/保留游戏
+            # 规则：直接→直接保留；同类型胡桃/TG→胡桃/TG关闭；不同类型关闭；最后一个任务看全局设置
+            settings = cfg.get("settings", {})
+            if len(pending) > 0:
+                next_type = pending[0].get("type", "direct")
+                if acc_type == "direct" and next_type == "direct":
+                    force_close_game = False
+                    self.log("[过渡] 下一个任务也是直接启动，强制保留游戏进程")
+                else:
+                    force_close_game = True
+                    if acc_type == "hutao" and next_type == "hutao":
+                        self.log("[过渡] 胡桃→胡桃，强制关闭游戏进程")
+                    elif acc_type == "tg_cdp" and next_type == "tg_cdp":
+                        self.log("[过渡] TG→TG，强制关闭游戏进程")
+                    elif acc_type != next_type:
+                        self.log(f"[过渡] {acc_type}→{next_type}，强制关闭游戏进程")
+            else:
+                # 最后一个任务：全局设置优先级最高
+                force_close_game = settings.get("close_game_after_all", True)
+                if force_close_game:
+                    self.log("[最后一个任务] 全局设置要求关闭游戏")
+                else:
+                    self.log("[最后一个任务] 全局设置要求保留游戏")
+
+            # BetterGI 和 TeyvatGuide 关闭策略：中间任务总是关闭，最后一个任务看全局设置
+            if len(pending) > 0:
+                force_close_bettergi = True
+                force_close_teyvatguide = True
+            else:
+                force_close_bettergi = settings.get("close_bettergi_after_all", False)
+                force_close_teyvatguide = settings.get("close_teyvatguide_after_all", True)
+                if force_close_bettergi:
+                    self.log("[最后一个任务] 全局设置要求关闭 BetterGI")
+                else:
+                    self.log("[最后一个任务] 全局设置要求保留 BetterGI")
+                if force_close_teyvatguide:
+                    self.log("[最后一个任务] 全局设置要求关闭 TeyvatGuide")
+                else:
+                    self.log("[最后一个任务] 全局设置要求保留 TeyvatGuide")
+
             if acc_type == "hutao":
+                # 胡桃→胡桃且 keep_hutao_alive：跳过杀掉胡桃进程
+                skip_hutao_kill = (keep_hutao_alive and prev_type == "hutao")
                 matched, recognized_uid = self._run_hutao_smart(
                     acc, gi_exe, gi_config, genshin_proc_name, sh_exe,
                     sh_app_id, timeout, log_date_str, pending,
+                    skip_hutao_kill=skip_hutao_kill,
+                    keep_hutao_alive=keep_hutao_alive,
+                    remaining_hutao=remaining_hutao,
+                    force_close_game=force_close_game,
+                    force_close_bettergi=force_close_bettergi,
+                )
+            elif acc_type == "tg_cdp":
+                skip_tg_init = keep_tg_alive and prev_type == "tg_cdp"
+                matched, recognized_uid = self._run_tg_cdp_smart(
+                    acc, gi_exe, gi_config, genshin_proc_name, timeout, log_date_str,
+                    is_last=(len(pending) == 0),
+                    keep_tg_alive=keep_tg_alive,
+                    remaining_tg=remaining_tg,
+                    skip_tg_init=skip_tg_init,
+                    force_close_game=force_close_game,
+                    force_close_bettergi=force_close_bettergi,
+                    force_close_teyvatguide=force_close_teyvatguide,
                 )
             else:
                 matched, recognized_uid = self._run_direct_smart(
                     acc, gi_exe, gi_config, genshin_proc_name, timeout, log_date_str,
                     is_last=(len(pending) == 0), prev_hutao=(prev_type == "hutao"),
+                    skip_ready_check=game_still_running,
+                    force_close_game=force_close_game,
+                    force_close_bettergi=force_close_bettergi,
                 )
 
             if matched:
@@ -1735,11 +2441,63 @@ class WorkerThread(threading.Thread):
                     self.log(f"[!] UID {recognized_uid} 未匹配任何账号或已执行，跳过")
 
             prev_type = acc_type
+            if acc_type == "hutao":
+                remaining_hutao -= 1
+            if acc_type == "tg_cdp":
+                remaining_tg -= 1
 
-        # 最终清理
-        for pn in GLOBAL_CLEANUP_TARGETS:
-            if find_proc(pn):
-                kill_proc(pn, graceful=False)
+        # 最终清理：根据是否手动停止采用不同的策略
+        settings = self.cfg.get("settings", {})
+        is_manual_stop = self.stop_event.is_set()
+
+        if is_manual_stop:
+            # 手动停止：由「手动停止时关闭所有进程」开关控制
+            if settings.get("stop_closes_all_processes", True):
+                self.log("手动停止：关闭所有进程...")
+                if find_proc(genshin_proc_name):
+                    kill_proc(genshin_proc_name, graceful=False)
+                    time.sleep(2)
+                if find_proc("BetterGI.exe"):
+                    kill_proc("BetterGI.exe", graceful=False)
+                    time.sleep(2)
+                for pn in ["Snap.Hutao.Remastered.exe",
+                           "Snap.Hutao.Remastered.FullTrust.exe"]:
+                    kill_proc(pn, graceful=False)
+                    time.sleep(1)
+                if find_proc("TeyvatGuide.exe"):
+                    kill_proc("TeyvatGuide.exe", graceful=False)
+                    time.sleep(1)
+            else:
+                self.log("手动停止：设置要求保留所有进程，不关闭")
+        else:
+            # 正常完成：由三个独立开关控制
+            close_game_after_all = settings.get("close_game_after_all", True)
+            close_bettergi_after_all = settings.get("close_bettergi_after_all", False)
+            close_hutao_after_all = settings.get("close_hutao_after_all", True)
+
+            if close_game_after_all and find_proc(genshin_proc_name):
+                self.log("关闭原神游戏进程...")
+                kill_proc(genshin_proc_name, graceful=False)
+                time.sleep(2)
+
+            if close_bettergi_after_all and find_proc("BetterGI.exe"):
+                self.log("关闭 BetterGI 进程...")
+                kill_proc("BetterGI.exe", graceful=False)
+                time.sleep(2)
+
+            if close_hutao_after_all:
+                for pn in ["Snap.Hutao.Remastered.exe",
+                           "Snap.Hutao.Remastered.FullTrust.exe"]:
+                    self.log(f"关闭胡桃工具箱 ({pn})...")
+                    # 直接 kill_proc（内部 psutil 枚举，绕过 find_proc 1秒缓存）
+                    kill_proc(pn, graceful=False)
+                    time.sleep(1)
+
+            close_teyvatguide_after_all = settings.get("close_teyvatguide_after_all", True)
+            if close_teyvatguide_after_all and find_proc("TeyvatGuide.exe"):
+                self.log("关闭 TeyvatGuide 进程...")
+                kill_proc("TeyvatGuide.exe", graceful=False)
+                time.sleep(1)
 
         self.log("=" * 50)
         self.log(f"完成。成功: {len(executed)}/{total}  {list(executed)}")
@@ -1747,13 +2505,37 @@ class WorkerThread(threading.Thread):
             self.log("(已中断)")
 
     def _run_direct_smart(self, acc, gi_exe, gi_config, genshin_proc, timeout,
-                         log_date_str, is_last, prev_hutao):
+                         log_date_str, is_last, prev_hutao, skip_ready_check=False,
+                         force_close_game=None, force_close_bettergi=None):
         """直接 BetterGI 启动（大号/小号）。
         先启动 BetterGI 自动登录，验证 UID 正确后再用 -startOneDragon 重启执行一条龙。
-        返回 (成功, 识别到的UID或空)。"""
+        返回 (成功, 识别到的UID或空)。
+        
+        skip_ready_check: 当为 True 时，表示游戏已经在运行中（上一个直接启动任务保留了进程），
+                          跳过 wait_genshin_ready 截图检测，直接进入 UID 验证。"""
+        cfg = load_config()
         genshin_proc_name = genshin_proc  # 保存进程名，scheduler 分支可能覆盖 genshin_proc
         name = acc["name"]
         expected_uid = acc.get("uid", "").strip()
+
+        # 任务前签到（胡桃签到）
+        if acc.get("checkin_before_task", False):
+            hutao_name = acc.get("hutao_account", "").strip()
+            if hutao_name:
+                # 衔接场景下游戏全屏会遮挡胡桃窗口，先最小化游戏
+                game_minimized = False
+                if skip_ready_check:
+                    self.log("最小化游戏窗口，避免遮挡胡桃签到...")
+                    game_minimized = minimize_genshin_window()
+                    time.sleep(1)
+                self.log(f"=== 胡桃签到: {hutao_name} ===")
+                _run_hutao_checkin(self.log, self.stop_event, [hutao_name])
+                # 签到完成后恢复游戏窗口
+                if game_minimized:
+                    find_and_activate_window_by_title("原神")
+                    time.sleep(0.5)
+            else:
+                self.log("跳过胡桃签到：未配置胡桃账号名")
 
         # 快速路径：无 UID 配置，直接启动 OneDragon，跳过验证阶段
         if not expected_uid:
@@ -1772,6 +2554,10 @@ class WorkerThread(threading.Thread):
                 kill_proc("BetterGI.exe")
                 return False, ""
             self.log(f"原神 PID={gs.pid}")
+            # 关闭所有可能遮挡游戏的窗口
+            minimize_window_by_process("TeyvatGuide.exe")
+            if acc.get("checkin_before_task", False) and acc.get("hutao_account", "").strip():
+                close_window_by_title("胡桃", self.log)
             time.sleep(5)
             ok = monitor_bettergi_log(log_date_str, timeout, self.log, self.stop_event, genshin_proc_name)
             self.log("一条龙完成，30秒后结束游戏...")
@@ -1782,47 +2568,75 @@ class WorkerThread(threading.Thread):
             if acc.get("close_bettergi", True):
                 kill_proc("BetterGI.exe")
                 time.sleep(2)
-            if acc.get("close_game", True):
+            do_close = force_close_game if force_close_game is not None else acc.get("close_game", True)
+            if do_close:
                 kill_proc(genshin_proc)
                 time.sleep(3)
             return ok, ""
 
-        if find_proc("BetterGI.exe"):
-            self.log("关闭 BetterGI...")
-            kill_proc("BetterGI.exe")
-            time.sleep(2)
+        if not skip_ready_check:
+            if find_proc("BetterGI.exe"):
+                self.log("关闭 BetterGI...")
+                kill_proc("BetterGI.exe")
+                time.sleep(2)
 
-        self.log("启动 BetterGI（自动登录，暂不执行一条龙）...")
-        pid = start_bettergi(gi_exe)
-        if not pid:
-            self.log("[!] BetterGI 启动失败")
-            return False, ""
-        self.log(f"BetterGI PID={pid}")
-        time.sleep(5)
+            self.log("启动 BetterGI（自动登录，暂不执行一条龙）...")
+            mw_group = cfg.get("uid", {}).get("main_world_detect_group", "")
+            if mw_group:
+                self.log(f"使用调度组 [{mw_group}] 检测主界面...")
+                pid = start_bettergi_with_args(gi_exe, ["--startGroups", mw_group])
+            else:
+                pid = start_bettergi(gi_exe)
+            if not pid:
+                self.log("[!] BetterGI 启动失败")
+                return False, ""
+            self.log(f"BetterGI PID={pid}")
+            time.sleep(5)
 
-        # 等待原神进入游戏并验证 UID
-        gs = wait_proc_appear(genshin_proc, 180, self.log, self.stop_event)
-        if not gs:
-            self.log("[!] 原神未启动")
-            kill_proc("BetterGI.exe")
-            return False, ""
-        self.log(f"原神 PID={gs.pid}")
+            # 等待原神进入游戏并验证 UID
+            gs = wait_proc_appear(genshin_proc, 180, self.log, self.stop_event)
+            if not gs:
+                self.log("[!] 原神未启动")
+                kill_proc("BetterGI.exe")
+                return False, ""
+            self.log(f"原神 PID={gs.pid}")
 
-        if not wait_genshin_ready(self.log, self.stop_event):
-            self.log("[!] 原神可能未进入游戏，继续尝试...")
+            # 关闭所有可能遮挡游戏的窗口
+            minimize_window_by_process("TeyvatGuide.exe")
+            if acc.get("checkin_before_task", False) and acc.get("hutao_account", "").strip():
+                close_window_by_title("胡桃", self.log)
 
-        if not self.stop_event.is_set():
-            self.log("等待界面渲染...")
-            time.sleep(8)
+            # 检测进入游戏主界面 / 开放世界
+            mw_group = cfg.get("uid", {}).get("main_world_detect_group", "")
+            if mw_group:
+                # BetterGI 调度组检测
+                self.log(f"使用调度组 [{mw_group}] 检测主界面...")
+                detect_ok = monitor_main_world_entered(log_date_str, 300, self.log, self.stop_event)
+                if not detect_ok:
+                    self.log("[!] 原神可能未进入游戏，继续尝试...")
+            else:
+                # 截图检测（fallback）
+                if not wait_genshin_ready(self.log, self.stop_event):
+                    self.log("[!] 原神可能未进入游戏，继续尝试...")
+                if not self.stop_event.is_set():
+                    self.log("等待界面渲染...")
+                    time.sleep(8)
+        else:
+            self.log("游戏已在运行中，跳过启动和进入检测...")
+            time.sleep(3)
 
         if expected_uid:
             # 轮询等待 UID 可见（BetterGI 全屏独占模式需时间切换）
-            self.log("等待游戏进入开放世界（UID 可见）...")
+            max_polls = 3 if skip_ready_check else 6
+            if skip_ready_check:
+                self.log("游戏已在运行中，快速验证 UID...")
+            else:
+                self.log("等待游戏进入开放世界（UID 可见）...")
             matched = False
             recognized = ""
             last_wrong_uid = ""
             wrong_streak = 0
-            for poll_idx in range(6):
+            for poll_idx in range(max_polls):
                 if self.stop_event.is_set():
                     return False, ""
                 time.sleep(8)
@@ -1844,7 +2658,7 @@ class WorkerThread(threading.Thread):
                     if wrong_streak >= 2 and len(recognized) >= 9:
                         self.log(f"连续 {wrong_streak} 次识别到 UID={recognized}，判定账号错误，立即切换")
                         break
-                self.log(f"UID 未检测到，继续等待... ({poll_idx+1}/6)")
+                self.log(f"UID 未检测到，继续等待... ({poll_idx+1}/{max_polls})")
             if not matched:
                 self.log(f"[!] UID 不匹配: 识别={recognized}，尝试切换账号...")
                 kill_proc("BetterGI.exe")
@@ -1905,10 +2719,12 @@ class WorkerThread(threading.Thread):
                             self.log("[!] 调度组执行超时或失败")
                             scheduler_ok = False
                         # 清理 + 返回
-                        if acc.get("close_bettergi", True):
+                        close_bgi = force_close_bettergi if force_close_bettergi is not None else acc.get("close_bettergi", True)
+                        if close_bgi:
                             kill_proc("BetterGI.exe")
                             time.sleep(2)
-                        if acc.get("close_game", True):
+                        do_close = force_close_game if force_close_game is not None else acc.get("close_game", True)
+                        if do_close:
                             kill_proc(genshin_proc)
                             time.sleep(3)
                         return scheduler_ok, ""
@@ -1993,8 +2809,8 @@ class WorkerThread(threading.Thread):
 
         ok = monitor_bettergi_log(log_date_str, timeout, self.log, self.stop_event, genshin_proc)
 
-        close_game = acc.get("close_game", True)
-        close_bettergi = acc.get("close_bettergi", True)
+        close_game = force_close_game if force_close_game is not None else acc.get("close_game", True)
+        close_bettergi = force_close_bettergi if force_close_bettergi is not None else acc.get("close_bettergi", True)
 
         if close_bettergi:
             self.log("关闭 BetterGI...")
@@ -2008,17 +2824,37 @@ class WorkerThread(threading.Thread):
         return ok, ""
 
     def _run_hutao_smart(self, acc, gi_exe, gi_config, genshin_proc, sh_exe,
-                         sh_app_id, timeout, log_date_str, pending):
+                         sh_app_id, timeout, log_date_str, pending,
+                         skip_hutao_kill=False, keep_hutao_alive=False,
+                         remaining_hutao=0, force_close_game=None,
+                         force_close_bettergi=None):
         """通过胡桃工具箱启动。
-        返回 (成功, 识别到的UID或空)。"""
+        返回 (成功, 识别到的UID或空)。
+        
+        skip_hutao_kill: 为 True 时不杀掉已运行的胡桃进程（2+胡桃批量模式）
+        keep_hutao_alive: 是否保持胡桃运行（任务结束后不关闭）
+        remaining_hutao: 剩余胡桃任务数（含当前）"""
+        cfg = load_config()
         name = acc["name"]
         hutao_account = acc.get("hutao_account", name)
 
-        self.log(f"胡桃账号: {hutao_account}")
+        self.log(f"米游社名称: {hutao_account}")
 
+        # 任务前签到（仅胡桃签到，TeyvatGuide 由全局统一处理）
+        if acc.get("checkin_before_task", False):
+            hutao_name = acc.get("hutao_account", "").strip()
+            if hutao_name:
+                self.log(f"=== 胡桃签到: {hutao_name} ===")
+                _run_hutao_checkin(self.log, self.stop_event, [hutao_name])
+            else:
+                self.log("跳过胡桃签到：未配置胡桃账号名")
+
+        # 清理进程：跳过胡桃进程当 skip_hutao_kill 为 True
         for pn in ["BetterGI.exe", genshin_proc,
                    "Snap.Hutao.Remastered.exe",
                    "Snap.Hutao.Remastered.FullTrust.exe"]:
+            if skip_hutao_kill and "Hutao" in pn:
+                continue  # 保留胡桃进程
             if find_proc(pn):
                 kill_proc(pn)
                 time.sleep(2)
@@ -2052,26 +2888,33 @@ class WorkerThread(threading.Thread):
             kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
             return False, ""
 
-        self.log("等待胡桃初始化...")
-        time.sleep(5)
+        if not skip_hutao_kill:
+            self.log("等待胡桃初始化...")
+            time.sleep(5)
+        else:
+            self.log("胡桃已在运行，跳过初始化等待...")
 
         if not verify_and_switch_hutao_account(hutao_account, self.log, self.stop_event):
             self.log("等待 15 秒供手动操作...")
             time.sleep(15)
 
-        # 切完账号后连点两次启动游戏（第一次可能被弹窗拦截）
+        # 点击启动游戏，检查进程是否出现，失败则重试
         game_launched = False
         for click_idx in range(2):
             if self.stop_event.is_set():
                 kill_proc("Snap.Hutao.Remastered.exe")
                 kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
                 return False, ""
-            if click_idx > 0:
-                self.log("第二次点击启动游戏...")
-                time.sleep(2)
             ok = click_hutao_start_game(self.log, self.stop_event)
             if ok:
-                game_launched = True
+                time.sleep(3)
+                gs = find_proc(genshin_proc)
+                if gs:
+                    self.log(f"原神 PID={gs.pid}")
+                    game_launched = True
+                    break
+                if click_idx == 0:
+                    self.log("游戏未启动，重试点击...")
 
         if not game_launched:
             self.log("[!] 无法点击胡桃启动按钮（uiautomation 未安装或窗口异常）")
@@ -2080,42 +2923,58 @@ class WorkerThread(threading.Thread):
             kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
             return False, ""
 
-        self.log("等待原神启动...")
-        gs = wait_proc_appear(genshin_proc, 180, self.log, self.stop_event)
-        if not gs:
-            self.log("[!] 原神未启动")
-            kill_proc("Snap.Hutao.Remastered.exe")
-            kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
-            return False, ""
+        # 游戏已启动，关闭所有可能遮挡的窗口
+        self.log("最小化胡桃和TG窗口...")
+        close_window_by_title("胡桃", self.log)
+        minimize_window_by_process("TeyvatGuide.exe")
 
-        self.log(f"原神 PID={gs.pid}")
+        # 启动 BetterGI 自动登录 + 主界面检测
+        mw_group = cfg.get("uid", {}).get("main_world_detect_group", "")
+        if mw_group:
+            # BetterGI 调度组检测
+            self.log(f"启动 BetterGI 自动登录，使用调度组 [{mw_group}] 检测主界面...")
+            pid = start_bettergi_with_args(gi_exe, ["start", "--startGroups", mw_group])
+            if not pid:
+                self.log("[!] BetterGI 启动失败")
+                kill_proc(genshin_proc)
+                kill_proc("Snap.Hutao.Remastered.exe")
+                kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
+                return False, ""
+            self.log(f"BetterGI PID={pid}")
 
-        if not wait_genshin_ready(self.log, self.stop_event):
-            self.log("[!] 原神可能未进入游戏，继续尝试...")
-
-        if not self.stop_event.is_set():
-            self.log("胡桃切换后等待游戏稳定...")
-            time.sleep(3)
-            self.log("等待界面渲染...")
-            time.sleep(8)
+            detect_ok = monitor_main_world_entered(log_date_str, 300, self.log, self.stop_event)
+            if not detect_ok:
+                self.log("[!] 原神可能未进入游戏，继续尝试...")
+        else:
+            # 截图检测（fallback）：检测到白屏时再启动 BetterGI
+            def _on_white_start_bettergi_hutao():
+                self.log("检测到白屏，启动 BetterGI 自动登录...")
+                pid = start_bettergi(gi_exe)
+                if not pid:
+                    self.log("[!] BetterGI 启动失败")
+                else:
+                    self.log(f"BetterGI PID={pid}")
+            if not wait_genshin_ready(self.log, self.stop_event,
+                                      on_white_detected=_on_white_start_bettergi_hutao):
+                self.log("[!] 原神可能未进入游戏，继续尝试...")
+            if not self.stop_event.is_set():
+                time.sleep(8)
 
         # 胡桃模式下由胡桃管理账号，无需验证 UID
         self.log("游戏已进入（胡桃模式，跳过 UID 验证）")
 
+        # 关闭胡桃逻辑：批量模式下非最后一个任务时不关闭
         close_hutao = acc.get("close_hutao", True)
+        if keep_hutao_alive and remaining_hutao > 1:
+            close_hutao = False  # 还有后续胡桃任务，保留胡桃运行
+            self.log(f"保留胡桃运行（剩余 {remaining_hutao - 1} 个胡桃任务）")
         if close_hutao:
-            self.log("关闭胡桃...")
-            kill_proc("Snap.Hutao.Remastered.exe")
-            kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
+            self.log("关闭胡桃窗口...")
+            close_window_by_title("胡桃", self.log)
             time.sleep(1)
 
-        self.log("等待 BetterGI 附带启动...")
-        bg_pid = wait_proc_appear("BetterGI.exe", 60, self.log, self.stop_event)
-        if not bg_pid:
-            self.log("[!] BetterGI 未出现")
-            kill_proc(genshin_proc)
-            return False, ""
-        self.log(f"BetterGI 已出现 PID={bg_pid.pid}，关闭后重新启动...")
+        # 关闭 BetterGI 后重新以一条龙启动
+        self.log("关闭 BetterGI 后重启执行一条龙...")
         kill_proc("BetterGI.exe")
         time.sleep(3)
 
@@ -2129,8 +2988,8 @@ class WorkerThread(threading.Thread):
 
         ok = monitor_bettergi_log(log_date_str, timeout, self.log, self.stop_event, genshin_proc)
 
-        close_game = acc.get("close_game", True)
-        close_bettergi = acc.get("close_bettergi", True)
+        close_game = force_close_game if force_close_game is not None else acc.get("close_game", True)
+        close_bettergi = force_close_bettergi if force_close_bettergi is not None else acc.get("close_bettergi", True)
 
         if close_bettergi:
             self.log("关闭 BetterGI...")
@@ -2143,6 +3002,374 @@ class WorkerThread(threading.Thread):
 
         return ok, ""
 
+    def _run_tg_cdp_smart(self, acc, gi_exe, gi_config, genshin_proc, timeout,
+                          log_date_str, is_last, keep_tg_alive=False, remaining_tg=0,
+                          skip_tg_init=False, force_close_game=None,
+                          force_close_bettergi=None,
+                          force_close_teyvatguide=None):
+        """通过 TeyvatGuide CDP 切换账号并启动游戏，后续接 BetterGI 一条龙。
+
+        流程：启动/连接 TeyvatGuide → 切换账号（按 UID 匹配）→ 点击启动
+        → 等待游戏进入 → 启动 BetterGI 自动登录 → 重启执行一条龙 → 监控日志。
+        返回 (成功, 识别到的UID或空)。
+        """
+        cfg = load_config()
+        import requests as _requests
+
+        try:
+            import websocket
+        except ImportError:
+            self.log("[TG] [!] websocket-client 未安装，请执行: pip install websocket-client")
+            return False, ""
+
+        name = acc["name"]
+        expected_uid = acc.get("uid", "").strip()
+
+        # 任务前签到（胡桃签到）
+        if acc.get("checkin_before_task", False):
+            hutao_name = acc.get("hutao_account", "").strip()
+            if hutao_name:
+                self.log(f"=== 胡桃签到: {hutao_name} ===")
+                _run_hutao_checkin(self.log, self.stop_event, [hutao_name])
+            else:
+                self.log("跳过胡桃签到：未配置胡桃账号名")
+
+        if not expected_uid:
+            self.log(f"[!] 账号「{name}」未配置 UID，TG CDP 启动需要 UID")
+            return False, ""
+
+        self.log(f"=== TG CDP 启动: {name} (UID: {expected_uid}) ===")
+
+        # ---- 启动 TeyvatGuide（防重复）----
+        if find_proc("TeyvatGuide.exe"):
+            self.log("[TG] TeyvatGuide 已在运行，跳过启动")
+            hwnd = find_and_activate_window_by_process("TeyvatGuide.exe")
+            if hwnd:
+                self.log("[TG] TeyvatGuide 窗口已置顶")
+            else:
+                self.log("[TG] 未找到 TeyvatGuide 窗口（可能已最小化到托盘）")
+        else:
+            self.log("[TG] 启动 TeyvatGuide...")
+            tg_app_id = get_teyvatguide_app_id()
+            try:
+                subprocess.Popen(
+                    ["explorer.exe", f"shell:AppsFolder\\{tg_app_id}"],
+                    shell=True,
+                )
+            except Exception as e:
+                self.log(f"[TG] [!] 启动 TeyvatGuide 失败: {e}")
+                return False, ""
+
+        if self.stop_event.is_set():
+            return False, ""
+
+        # ---- 等待 CDP 端口 9222 就绪 ----
+        self.log("[TG] 等待 CDP 调试端口 (127.0.0.1:9222) 就绪（最多 120 秒）...")
+        for attempt in range(60):
+            if self.stop_event.is_set():
+                return False, ""
+            try:
+                resp = _requests.get("http://127.0.0.1:9222/json/version", timeout=2)
+                if resp.status_code == 200:
+                    self.log(f"[TG] CDP 端口就绪 (第 {attempt+1} 次尝试)")
+                    break
+            except Exception:
+                pass
+            time.sleep(2)
+        else:
+            self.log("[TG] [!] CDP 端口 9222 超时未就绪（120 秒）")
+            return False, ""
+
+        # 等待 TeyvatGuide 完全加载（WebView2 初始化需要时间）
+        if not skip_tg_init:
+            self.log("[TG] 等待界面加载...")
+            time.sleep(5)
+        else:
+            self.log("[TG] TeyvatGuide 已在运行，跳过界面加载等待...")
+
+        if self.stop_event.is_set():
+            return False, ""
+
+        # ---- 查找 TeyvatGuide 页面 CDP 目标 ----
+        self.log("[TG] 查找 TeyvatGuide CDP 目标...")
+        ws_url = None
+        for retry in range(10):
+            if self.stop_event.is_set():
+                return False, ""
+            try:
+                targets = _requests.get("http://127.0.0.1:9222/json", timeout=5).json()
+                for t in targets:
+                    if t.get("type") == "page" and "tauri.localhost" in t.get("url", ""):
+                        ws_url = t["webSocketDebuggerUrl"]
+                        self.log(f"[TG] 找到 TeyvatGuide 页面: {t['url']}")
+                        break
+                if ws_url:
+                    break
+                self.log(f"[TG] 未找到 TeyvatGuide 页面 (retry={retry+1}/10)")
+            except Exception as e:
+                self.log(f"[TG] 查询 CDP 目标异常: {e} (retry={retry+1}/10)")
+            time.sleep(2)
+        else:
+            self.log("[TG] [!] 未找到 TeyvatGuide 页面，请确认 TeyvatGuide 已启动")
+            return False, ""
+
+        # ---- 连接 WebSocket ----
+        self.log("[TG] 连接 CDP WebSocket...")
+        try:
+            ws = websocket.create_connection(ws_url, timeout=15, enable_multithread=True)
+        except Exception as e:
+            self.log(f"[TG] [!] WebSocket 连接失败: {e}")
+            return False, ""
+
+        def _cdp_call(method, params=None, timeout_s=20):
+            """发送 CDP 命令并等待响应。返回 result 对象或 None。"""
+            msg_id = int(time.time() * 1000) % 999999
+            msg = json.dumps({"id": msg_id, "method": method, "params": params or {}})
+            try:
+                ws.send(msg)
+            except Exception as e:
+                self.log(f"[TG] [!] CDP 发送失败: {e}")
+                return None
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                if self.stop_event.is_set():
+                    return None
+                try:
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    ws.settimeout(remaining)
+                    raw = ws.recv()
+                    resp = json.loads(raw)
+                    if resp.get("id") == msg_id:
+                        if "error" in resp:
+                            err = resp["error"]
+                            self.log(f"[TG] [!] CDP 错误 {method}: {err.get('message', err)}")
+                            return None
+                        result = resp.get("result", {})
+                        return result.get("value") if "value" in result else result
+                except Exception:
+                    break
+            self.log(f"[TG] [!] CDP {method} 超时 (id={msg_id})")
+            return None
+
+        def _cdp_eval(expression, timeout_s=20):
+            """执行 JavaScript 并返回结果值。"""
+            val = _cdp_call("Runtime.evaluate", {"expression": expression}, timeout_s=timeout_s)
+            return val
+
+        try:
+            # 启用 Runtime 域
+            self.log("[TG] 启用 CDP Runtime 域...")
+            res = _cdp_call("Runtime.enable")
+            if res is None:
+                self.log("[TG] [!] Runtime.enable 失败")
+                ws.close()
+                return False, ""
+
+            # 排空初始化事件（简单 sleep + 排空）
+            time.sleep(1.5)
+            ws.settimeout(0.5)
+            for _ in range(10):
+                try:
+                    ws.recv()
+                except Exception:
+                    break
+            ws.settimeout(20)
+
+            # ---- Step 0: 检查当前账号是否已是目标账号 ----
+            miyoushe_name = acc.get("hutao_account", name)
+            self.log(f"[TG] 米游社名称: {miyoushe_name}")
+            current_same = False
+            if miyoushe_name:
+                result = _cdp_eval(f"""
+(function() {{
+    var items = document.querySelectorAll('.v-list-item');
+    for (var i = 0; i < items.length; i++) {{
+        var title = items[i].querySelector('.v-list-item-title');
+        if (title && title.textContent.trim() === '添加账号' && i > 0) {{
+            var prev = items[i - 1].querySelector('.v-list-item-title');
+            return prev ? prev.textContent.trim() : '';
+        }}
+    }}
+    return '';
+}})()
+""")
+                current_name = str(result).strip().strip("'").strip('"') if result else ""
+                if current_name:
+                    self.log(f"[TG] 当前侧边栏账号: {current_name}")
+                    if current_name == miyoushe_name:
+                        self.log(f"[TG] 当前账号已是目标账号「{miyoushe_name}」，跳过切换")
+                        current_same = True
+                    else:
+                        self.log(f"[TG] 当前账号「{current_name}」≠ 目标「{miyoushe_name}」，执行切换")
+                else:
+                    self.log("[TG] 未能读取当前账号名，执行切换")
+
+            if not current_same:
+                # ---- Step 1: 点击侧边栏「切换账号」 ----
+                self.log("[TG] 点击「切换账号」...")
+                result = _cdp_eval("""
+(function() {
+    var items = document.querySelectorAll('.v-list-item-title');
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].textContent.trim() === '切换账号') {
+            items[i].closest('.v-list-item').click();
+            return 'clicked';
+        }
+    }
+    return 'not_found';
+})()
+""")
+                self.log(f"[TG] 切换账号结果: {result}")
+                time.sleep(1)
+
+                # ---- Step 2: 在弹出 overlay 中按 UID 查找并点击账号 ----
+                self.log(f"[TG] 搜索 UID: {expected_uid}...")
+                result = _cdp_eval(f"""
+(function() {{
+    var subtitles = document.querySelectorAll('.v-list-item-subtitle');
+    for (var i = 0; i < subtitles.length; i++) {{
+        if (subtitles[i].textContent.indexOf('{expected_uid}') !== -1) {{
+            subtitles[i].closest('.v-list-item').click();
+            return 'clicked_' + subtitles[i].textContent.trim();
+        }}
+    }}
+    return 'not_found';
+}})()
+""")
+                self.log(f"[TG] 账号选择结果: {result}")
+                if result and "not_found" in str(result):
+                    self.log(f"[TG] [!] 未找到 UID {expected_uid} 对应的账号")
+                    ws.close()
+                    return False, ""
+                time.sleep(1.5)
+
+            # ---- Step 3: 点击侧边栏账号名打开菜单 ----
+            self.log("[TG] 打开账号操作菜单...")
+            result = _cdp_eval("""
+(function() {
+    // 账户名始终在「添加账号」前一项
+    var items = document.querySelectorAll('.v-list-item');
+    for (var i = 0; i < items.length; i++) {
+        var title = items[i].querySelector('.v-list-item-title');
+        if (title && title.textContent.trim() === '添加账号' && i > 0) {
+            items[i - 1].click();
+            var prev = items[i - 1].querySelector('.v-list-item-title');
+            return 'clicked_' + (prev ? prev.textContent.trim() : '?');
+        }
+    }
+    return 'not_found';
+})()
+""")
+            self.log(f"[TG] 打开菜单结果: {result}")
+            time.sleep(1)
+
+            # ---- Step 4: 点击菜单中的「启动」 ----
+            self.log("[TG] 点击「启动」...")
+            result = _cdp_eval("""
+(function() {
+    var items = document.querySelectorAll('.v-list-item-title');
+    for (var i = 0; i < items.length; i++) {
+        if (items[i].textContent.trim() === '启动') {
+            items[i].closest('.v-list-item').click();
+            return 'clicked';
+        }
+    }
+    return 'not_found';
+})()
+""")
+            self.log(f"[TG] 启动结果: {result}")
+            time.sleep(1)
+
+            ws.close()
+
+            # ---- 等待游戏进程出现 ----
+            self.log("[TG] 等待原神启动...")
+            gs = wait_proc_appear(genshin_proc, 180, self.log, self.stop_event)
+            if not gs:
+                self.log("[TG] [!] 原神未启动")
+                return False, ""
+            self.log(f"[TG] 原神 PID={gs.pid}")
+
+            # 游戏已启动，最小化 TeyvatGuide 避免遮挡
+            minimize_window_by_process("TeyvatGuide.exe")
+            if acc.get("checkin_before_task", False) and acc.get("hutao_account", "").strip():
+                close_window_by_title("胡桃", self.log)
+
+            # 启动 BetterGI 自动登录 + 主界面检测
+            mw_group = cfg.get("uid", {}).get("main_world_detect_group", "")
+            if mw_group:
+                # BetterGI 调度组检测
+                self.log(f"[TG] 启动 BetterGI 自动登录，使用调度组 [{mw_group}] 检测主界面...")
+                pid = start_bettergi_with_args(gi_exe, ["start", "--startGroups", mw_group])
+                if not pid:
+                    self.log("[!] BetterGI 启动失败")
+                    kill_proc(genshin_proc)
+                    return False, ""
+                self.log(f"BetterGI PID={pid}")
+
+                detect_ok = monitor_main_world_entered(log_date_str, 300, self.log, self.stop_event)
+                if not detect_ok:
+                    self.log("[!] 原神可能未进入游戏，继续尝试...")
+            else:
+                # 截图检测（fallback）：检测到白屏时再启动 BetterGI
+                def _on_white_start_bettergi_tg():
+                    self.log("[TG] 检测到白屏，启动 BetterGI 自动登录...")
+                    pid = start_bettergi(gi_exe)
+                    if not pid:
+                        self.log("[!] BetterGI 启动失败")
+                    else:
+                        self.log(f"BetterGI PID={pid}")
+                if not wait_genshin_ready(self.log, self.stop_event,
+                                          on_white_detected=_on_white_start_bettergi_tg):
+                    self.log("[!] 原神可能未进入游戏，继续尝试...")
+                if not self.stop_event.is_set():
+                    time.sleep(8)
+
+            # TG CDP 已按 UID 切换账号，跳过 UID 验证
+            self.log("游戏已进入（TG CDP 模式，跳过 UID 验证）")
+
+            # 关闭 BetterGI 后重新以一条龙模式启动
+            kill_proc("BetterGI.exe")
+            time.sleep(3)
+            self.log("重启 BetterGI 执行一条龙...")
+            pid_onedragon = start_bettergi_onedragon(gi_exe)
+            if not pid_onedragon:
+                self.log("[!] BetterGI 一条龙启动失败")
+                kill_proc(genshin_proc)
+                return False, ""
+            self.log(f"BetterGI PID={pid_onedragon}")
+
+            ok = monitor_bettergi_log(log_date_str, timeout, self.log, self.stop_event, genshin_proc)
+
+            close_game = force_close_game if force_close_game is not None else acc.get("close_game", True)
+            close_bettergi = force_close_bettergi if force_close_bettergi is not None else acc.get("close_bettergi", True)
+            close_teyvatguide = force_close_teyvatguide if force_close_teyvatguide is not None else acc.get("close_teyvatguide", True)
+            if keep_tg_alive and remaining_tg > 1:
+                close_teyvatguide = False
+                self.log(f"保留 TeyvatGuide 运行（剩余 {remaining_tg - 1} 个 TG CDP 任务）")
+            if close_bettergi:
+                kill_proc("BetterGI.exe")
+                time.sleep(2)
+            if close_game:
+                kill_proc(genshin_proc)
+                time.sleep(3)
+            if close_teyvatguide:
+                self.log("关闭 TeyvatGuide...")
+                close_window_by_title("TeyvatGuide", self.log)
+
+            return ok, expected_uid
+
+        except Exception as e:
+            self.log(f"[TG] [!] CDP 操作异常: {e}")
+            try:
+                ws.close()
+            except Exception:
+                pass
+            return False, ""
+
+
 
 # ============================================================
 # 添加账号对话框
@@ -2151,11 +3378,14 @@ class WorkerThread(threading.Thread):
 class AddAccountDialog(tk.Toplevel):
     def __init__(self, parent, edit_account=None):
         super().__init__(parent)
+        # 清除 Tkinter 默认图标
+        self.tk.call("wm", "iconbitmap", self._w, "-default", _gen_blank_ico())
+        self.iconbitmap(_gen_blank_ico())
         self.result = None
         self.edit_account = edit_account
 
         self.title("编辑账号" if edit_account else "添加账号")
-        self.geometry("420x680")
+        self.geometry("420x710")
         self.resizable(False, False)
         self.configure(bg=COLORS["bg"])
         self.transient(parent)
@@ -2195,7 +3425,9 @@ class AddAccountDialog(tk.Toplevel):
         ttk.Radiobutton(type_frame, text="直接启动 (BetterGI)", variable=self.type_var,
                         value="direct").pack(side="left", padx=(0, 15))
         ttk.Radiobutton(type_frame, text="胡桃启动", variable=self.type_var,
-                        value="hutao").pack(side="left")
+                        value="hutao").pack(side="left", padx=(0, 15))
+        ttk.Radiobutton(type_frame, text="TeyvatGuide", variable=self.type_var,
+                        value="tg_cdp").pack(side="left")
 
         # 配置选择
         ttk.Label(self, text="BetterGI 一条龙配置", foreground=label_fg,
@@ -2218,12 +3450,19 @@ class AddAccountDialog(tk.Toplevel):
                                             values=["（无）"] + groups, state="readonly", width=37)
         self.scheduler_combo.pack(fill="x", padx=20, pady=(0, 8))
 
-        # 胡桃账号名
-        ttk.Label(self, text="胡桃中的账号名称（仅胡桃启动）", foreground=label_fg,
+        # 米游社名称
+        ttk.Label(self, text="米游社名称（胡桃/TG共用）", foreground=label_fg,
                   background=COLORS["bg"]).pack(anchor="w", **pad)
         self.hutao_var = tk.StringVar(value=edit.get("hutao_account", "") if edit else "")
         self.hutao_entry = ttk.Entry(self, textvariable=self.hutao_var, width=40)
         self.hutao_entry.pack(fill="x", padx=20, pady=(0, 8))
+
+        # 任务前签到勾选
+        self.checkin_var = tk.BooleanVar(value=edit.get("checkin_before_task", False) if edit else False)
+        self.checkin_cb = tk.Checkbutton(self, text="执行任务前先用胡桃签到\n（需填写「米游社名称」）", variable=self.checkin_var)
+        self.checkin_cb.pack(anchor="w", padx=20, pady=(8, 0))
+
+        self.checkin_var.trace_add("write", self._on_checkin_toggled)
 
         # 游戏UID
         ttk.Label(self, text="游戏UID（用于验证账号）", foreground=label_fg,
@@ -2244,13 +3483,22 @@ class AddAccountDialog(tk.Toplevel):
             value=edit.get("close_bettergi", True) if edit else True)
         self.close_hutao_var = tk.BooleanVar(
             value=edit.get("close_hutao", True) if edit else True)
+        self.close_teyvatguide_var = tk.BooleanVar(
+            value=edit.get("close_teyvatguide", True) if edit else True)
 
-        tk.Checkbutton(chk_frame, text="关闭游戏",
+        row1 = tk.Frame(chk_frame, bg=COLORS["bg"])
+        row1.pack(fill="x")
+        tk.Checkbutton(row1, text="关闭游戏",
                         variable=self.close_game_var).pack(side="left", padx=(0, 10))
-        tk.Checkbutton(chk_frame, text="关闭BetterGI",
-                        variable=self.close_bettergi_var).pack(side="left", padx=(0, 10))
-        tk.Checkbutton(chk_frame, text="关闭胡桃",
-                        variable=self.close_hutao_var).pack(side="left")
+        tk.Checkbutton(row1, text="关闭BetterGI",
+                        variable=self.close_bettergi_var).pack(side="left")
+
+        row2 = tk.Frame(chk_frame, bg=COLORS["bg"])
+        row2.pack(fill="x")
+        tk.Checkbutton(row2, text="关闭胡桃",
+                        variable=self.close_hutao_var).pack(side="left", padx=(0, 10))
+        tk.Checkbutton(row2, text="关闭 TeyvatGuide",
+                        variable=self.close_teyvatguide_var).pack(side="left")
 
         # 按钮
         btn_frame = tk.Frame(self, bg=COLORS["bg"])
@@ -2270,7 +3518,22 @@ class AddAccountDialog(tk.Toplevel):
                                padx=20, pady=3, cursor="hand2", bd=0)
         cancel_btn.pack(side="left", padx=5)
 
+    def _on_checkin_toggled(self, *args):
+        pass
+
     def _save(self):
+        # 勾选签到 → 必须填米游社名称
+        if self.checkin_var.get() and not self.hutao_var.get().strip():
+            messagebox.showwarning("无法保存", "您勾选了「执行任务前先用胡桃签到」，请务必填写「米游社名称」，签到需要用它切换账号。")
+            return
+
+        acc_type = self.type_var.get()
+
+        # 直接启动 / TG CDP 启动 → 必须填 UID
+        if acc_type in ("direct", "tg_cdp") and not self.uid_var.get().strip():
+            messagebox.showwarning("无法保存", "该启动方式必须填写「账号UID」，否则无法识别账号。")
+            return
+
         name = self.name_var.get().strip()
         if not name:
             messagebox.showwarning("提示", "请输入账号名称", parent=self)
@@ -2280,11 +3543,14 @@ class AddAccountDialog(tk.Toplevel):
             messagebox.showwarning("提示", "请选择 BetterGI 配置", parent=self)
             return
 
-        acc_type = self.type_var.get()
-        hutao_account = self.hutao_var.get().strip() if acc_type == "hutao" else ""
+        hutao_account = self.hutao_var.get().strip()
 
         if acc_type == "hutao" and not hutao_account:
             messagebox.showwarning("提示", "请输入胡桃中的账号名称", parent=self)
+            return
+
+        if acc_type == "tg_cdp" and not hutao_account:
+            messagebox.showwarning("提示", "TG CDP 启动方式必须填写「米游社名称」，用于在 TeyvatGuide 中切换账号。", parent=self)
             return
 
         self.result = {
@@ -2296,7 +3562,9 @@ class AddAccountDialog(tk.Toplevel):
             "close_game": self.close_game_var.get(),
             "close_bettergi": self.close_bettergi_var.get(),
             "close_hutao": self.close_hutao_var.get(),
+            "close_teyvatguide": self.close_teyvatguide_var.get(),
             "scheduler_groups": self.scheduler_var.get(),
+            "checkin_before_task": self.checkin_var.get(),
         }
         self.destroy()
 
@@ -2307,9 +3575,12 @@ class AddAccountDialog(tk.Toplevel):
 # ============================================================
 
 class HotkeyDetectDialog(tk.Toplevel):
-    """快捷键检测弹窗 - 支持组合键和单键（使用 keyboard 库确保可靠性）"""
+    """快捷键检测弹窗 - 纯 tkinter 实现，无外部依赖"""
     def __init__(self, parent, callback):
         super().__init__(parent)
+        # 清除 Tkinter 默认图标
+        self.tk.call("wm", "iconbitmap", self._w, "-default", _gen_blank_ico())
+        self.iconbitmap(_gen_blank_ico())
         self.callback = callback
         self.title("检测快捷键")
         self.geometry("360x200")
@@ -2320,6 +3591,12 @@ class HotkeyDetectDialog(tk.Toplevel):
 
         self.result = None
         self._finished = False
+        self._pressed = set()
+        self._mod_names = {"Control_L": "ctrl", "Control_R": "ctrl",
+                           "Shift_L": "shift", "Shift_R": "shift",
+                           "Alt_L": "alt", "Alt_R": "alt",
+                           "Meta_L": "win", "Meta_R": "win",
+                           "Win_L": "win", "Win_R": "win"}
 
         tk.Label(self, text="请按下您想要设置的快捷键",
                  font=("Microsoft YaHei", 13), bg=COLORS["bg"],
@@ -2334,15 +3611,22 @@ class HotkeyDetectDialog(tk.Toplevel):
                                     bg=COLORS["bg"], fg=COLORS["primary"])
         self.key_display.pack(pady=5)
 
-        tk.Label(self, text="按 Esc 取消",
+        clear_btn = tk.Button(self, text="清空（不绑定）", command=self._on_clear,
+                              bg="#95A5A6", fg="white", relief="flat",
+                              font=("Microsoft YaHei", 9), padx=12, pady=3,
+                              cursor="hand2", bd=0)
+        clear_btn.pack(pady=(0, 5))
+
+        tk.Label(self, text="按 Esc 取消  |  松开组合键确定",
                  font=("Microsoft YaHei", 9), bg=COLORS["bg"],
-                 fg=COLORS["text_light"]).pack(pady=(8, 0))
+                 fg=COLORS["text_light"]).pack(pady=(0, 0))
 
         self._center()
 
-        # 后台线程使用 keyboard 库监听按键组合
-        self._thread = threading.Thread(target=self._listen_keyboard, daemon=True)
-        self._thread.start()
+        # 绑定全部按键事件到顶层窗口
+        self.bind_all("<KeyPress>", self._on_key_press)
+        self.bind_all("<KeyRelease>", self._on_key_release)
+        self.protocol("WM_DELETE_WINDOW", self._on_cancel)
 
     def _center(self):
         self.update_idletasks()
@@ -2355,73 +3639,84 @@ class HotkeyDetectDialog(tk.Toplevel):
         y = py + (ph - h) // 2
         self.geometry(f"+{x}+{y}")
 
-    def _listen_keyboard(self):
-        """使用 keyboard.read_hotkey 检测组合键，在后台线程中运行"""
+    def _on_clear(self):
+        """清空快捷键（设置为空）"""
+        self.result = ""
+        self._finished = True
+        self._unbind_all()
+        self._done()
+
+    def _on_cancel(self):
+        self._unbind_all()
+        self.destroy()
+
+    def _unbind_all(self):
         try:
-            import keyboard
-        except ImportError:
-            self.key_display.config(text="keyboard 库未安装")
+            self.unbind_all("<KeyPress>")
+            self.unbind_all("<KeyRelease>")
+        except Exception:
+            pass
+
+    def _on_key_press(self, event):
+        if self._finished:
+            return "break"
+        keysym = event.keysym
+        # Esc 取消
+        if keysym == "Escape":
+            self._finished = True
+            self._unbind_all()
+            self.after(100, self.destroy)
+            return "break"
+        self._pressed.add(keysym)
+        self._update_display()
+        return "break"
+
+    def _on_key_release(self, event):
+        if self._finished:
+            return "break"
+        keysym = event.keysym
+        # 非修饰键松开 → 组合键完成
+        if keysym not in ("Control_L", "Control_R", "Shift_L", "Shift_R",
+                          "Alt_L", "Alt_R", "Meta_L", "Meta_R",
+                          "Win_L", "Win_R"):
+            if self._pressed and not self._finished:
+                self._finished = True
+                self._unbind_all()
+                self.result = self._build_hotkey_str()
+                self.after(150, self._done)
+                return "break"
+        return "break"
+
+    def _build_hotkey_str(self):
+        """从 pressed 集合构建 'ctrl+shift+q' 格式字符串"""
+        mods = []
+        main_keys = []
+        for k in self._pressed:
+            if k in self._mod_names:
+                mods.append(self._mod_names[k])
+            else:
+                main_keys.append(k.lower())
+        # 去重修饰符
+        seen = set()
+        mods_unique = []
+        for m in mods:
+            if m not in seen:
+                seen.add(m)
+                mods_unique.append(m)
+        return "+".join(mods_unique + main_keys)
+
+    def _update_display(self):
+        if not self._pressed:
+            self.key_display.config(text="等待按键...")
             return
-
-        # 先清除可能残留的 hook
-        keyboard.unhook_all()
-
-        pressed_keys = set()
-        display_lock = threading.Lock()
-
-        def on_key(event):
-            if self._finished:
-                return
-            name = event.name
-            if event.event_type == "down":
-                # Esc 取消
-                if name.lower() in ("esc", "escape"):
-                    self._finished = True
-                    keyboard.unhook_all()
-                    self.after(100, self.destroy)
-                    return
-                pressed_keys.add(name)
-            elif event.event_type == "up":
-                # 当非修饰键松开时，视为组合键完成
-                if name not in ("ctrl", "shift", "alt", "windows", "left windows", "right windows"):
-                    if pressed_keys and not self._finished:
-                        self._finished = True
-                        keyboard.unhook_all()
-                        # 构建 hotkey 字符串
-                        parts = []
-                        for m in ("ctrl", "shift", "alt", "windows"):
-                            if m in pressed_keys or "left " + m in pressed_keys or "right " + m in pressed_keys:
-                                parts.append(m)
-                        main_keys = [k for k in pressed_keys
-                                     if k not in ("ctrl", "shift", "alt", "windows",
-                                                  "left windows", "right windows",
-                                                  "left ctrl", "right ctrl",
-                                                  "left shift", "right shift",
-                                                  "left alt", "right alt")]
-                        parts.extend(main_keys)
-                        self.result = "+".join(parts)
-                        self.after(200, self._done)
-                        return
-            # 更新显示
-            with display_lock:
-                parts = []
-                for m in ("ctrl", "shift", "alt", "windows"):
-                    if m in pressed_keys or "left " + m in pressed_keys or "right " + m in pressed_keys:
-                        parts.append(m)
-                main_keys = [k for k in pressed_keys
-                             if k not in ("ctrl", "shift", "alt", "windows",
-                                          "left windows", "right windows",
-                                          "left ctrl", "right ctrl",
-                                          "left shift", "right shift",
-                                          "left alt", "right alt")]
-                parts.extend(main_keys)
-                display = " + ".join(p.upper() if len(p) == 1 else p for p in parts) if parts else "等待按键..."
-                self.key_display.config(text=display)
-
-        keyboard.hook(on_key, suppress=False)
+        parts = []
+        for k in self._pressed:
+            name = self._mod_names.get(k, k)
+            parts.append(name.upper() if len(name) == 1 else name)
+        self.key_display.config(text=" + ".join(parts))
 
     def _done(self):
-        if self.result and self.callback:
+        if self.callback is not None and self._finished:
             self.callback(self.result)
         self.destroy()
 
@@ -2433,11 +3728,14 @@ class HotkeyDetectDialog(tk.Toplevel):
 class SettingsDialog(tk.Toplevel):
     def __init__(self, parent, cfg):
         super().__init__(parent)
+        # 清除 Tkinter 默认图标
+        self.tk.call("wm", "iconbitmap", self._w, "-default", _gen_blank_ico())
+        self.iconbitmap(_gen_blank_ico())
         self.result = False
         self.cfg = cfg
 
         self.title("软件设置")
-        self.geometry("480x600")
+        self.geometry("580x650")
         self.resizable(True, True)
         self.configure(bg=COLORS["bg"])
         self.transient(parent)
@@ -2502,7 +3800,15 @@ class SettingsDialog(tk.Toplevel):
 
         # 鼠标滚轮
         def _on_mousewheel(event):
-            self._scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            if not self._scroll_canvas.winfo_exists():
+                return
+            bbox = self._scroll_canvas.bbox("all")
+            if not bbox:
+                return
+            content_h = bbox[3] - bbox[1]
+            visible_h = self._scroll_canvas.winfo_height()
+            if content_h > visible_h:
+                self._scroll_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
         self._scroll_canvas.bind("<Enter>", lambda e: self._scroll_canvas.bind_all("<MouseWheel>", _on_mousewheel))
         self._scroll_canvas.bind("<Leave>", lambda e: self._scroll_canvas.unbind_all("<MouseWheel>"))
 
@@ -2520,6 +3826,26 @@ class SettingsDialog(tk.Toplevel):
                             relief="flat", font=("Microsoft YaHei", 9),
                             padx=10, cursor="hand2", bd=0)
             btn.pack(side="left", padx=(5, 0))
+
+        # "路径自动识别"分组框：一键自动识别按钮 + 扫描结果状态标签
+        detect_frame = tk.LabelFrame(inner, text="路径自动识别",
+                                     bg=COLORS["border"], fg=COLORS["text"],
+                                     font=("Microsoft YaHei", 9),
+                                     padx=10, pady=8, bd=1, relief="groove")
+        detect_frame.pack(fill="x", padx=12, pady=(4, 12))
+
+        tk.Button(detect_frame, text="一键自动识别",
+                  command=self._auto_detect_paths,
+                  bg="#F0F0F0", fg=COLORS["text"],
+                  relief="flat", font=("Microsoft YaHei", 9),
+                  padx=10, cursor="hand2", bd=0).pack(anchor="center", pady=(4, 6))
+
+        # 扫描结果状态标签（初始为空）
+        self.status_label = tk.Label(detect_frame, text="", bg=COLORS["border"],
+                                     fg=COLORS["text_light"],
+                                     font=("Microsoft YaHei", 9),
+                                     justify="center", anchor="center")
+        self.status_label.pack(fill="x", pady=(0, 4))
 
         # 1. BetterGI 可执行文件
         self.bettergi_exe_var = tk.StringVar(value=cfg["bettergi"]["exe"])
@@ -2558,6 +3884,18 @@ class SettingsDialog(tk.Toplevel):
         self.hutao_appid_var = tk.StringVar(value=cfg["snap_hutao"].get("app_id", ""))
         ttk.Entry(inner, textvariable=self.hutao_appid_var, width=entry_width).pack(
             fill="x", padx=20, pady=(0, 10))
+
+        # 6b. TeyvatGuide AppID (可选，为空则用内置默认值)
+        ttk.Label(inner, text="TeyvatGuide AppID (MSIX, 可选)", foreground=label_fg,
+                  background=COLORS["bg"]).pack(anchor="w", **pad)
+        self.teyvatguide_appid_var = tk.StringVar(value=cfg.get("teyvatguide", {}).get("app_id", ""))
+        tg_row = tk.Frame(inner, bg=COLORS["bg"])
+        tg_row.pack(fill="x", padx=20, pady=(0, 10))
+        ttk.Entry(tg_row, textvariable=self.teyvatguide_appid_var, width=entry_width).pack(
+            side="left", fill="x", expand=True)
+        tk.Label(tg_row, text="  留空则使用内置默认值",
+                 bg=COLORS["bg"], fg=COLORS["text_light"],
+                 font=("Microsoft YaHei", 8)).pack(side="left")
 
         # 7. 一条龙超时时间 (秒)
         ttk.Label(inner, text="一条龙超时时间 (秒)", foreground=label_fg,
@@ -2600,6 +3938,23 @@ class SettingsDialog(tk.Toplevel):
                  bg=COLORS["bg"], fg=COLORS["text_light"],
                  font=("Microsoft YaHei", 8)).pack(anchor="w", padx=20, pady=(0, 10))
 
+        # 开始任务快捷键
+        ttk.Label(inner, text="全局开始任务快捷键", foreground=label_fg,
+                  background=COLORS["bg"]).pack(anchor="w", **pad)
+        self.start_hotkey_var = tk.StringVar(value=cfg.get("hotkeys", {}).get("start", ""))
+        row3 = tk.Frame(inner, bg=COLORS["bg"])
+        row3.pack(fill="x", padx=20, pady=(0, 10))
+        entry3 = ttk.Entry(row3, textvariable=self.start_hotkey_var, width=entry_width - 10, state="readonly")
+        entry3.pack(side="left", fill="x", expand=True)
+        entry3.bind("<Button-1>", lambda e: self._detect_hotkey("start"))
+        tk.Button(row3, text="点击设置", command=lambda: self._detect_hotkey("start"),
+                  bg=COLORS["primary"], fg=COLORS["text_white"],
+                  relief="flat", font=("Microsoft YaHei", 10, "bold"),
+                  padx=16, pady=4, cursor="hand2", bd=0).pack(side="left", padx=(8, 0))
+        tk.Label(inner, text="  留空则不绑定，支持组合键，如 Ctrl+Shift+S",
+                 bg=COLORS["bg"], fg=COLORS["text_light"],
+                 font=("Microsoft YaHei", 8)).pack(anchor="w", padx=20, pady=(0, 10))
+
         # 启动时自动最小化
         self.auto_minimize_var = tk.BooleanVar(value=cfg.get("settings", {}).get("auto_minimize", True))
         tk.Checkbutton(inner, text="启动时自动最小化窗口（避免挡住游戏）",
@@ -2614,6 +3969,87 @@ class SettingsDialog(tk.Toplevel):
         self.auto_shutdown_var = tk.BooleanVar(value=cfg.get("settings", {}).get("auto_shutdown", False))
         tk.Checkbutton(inner, text="所有任务完成后自动关机（60秒倒计时，可取消）",
                         variable=self.auto_shutdown_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 所有任务完成后关闭游戏
+        self.close_game_after_all_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("close_game_after_all", True))
+        tk.Checkbutton(inner, text="所有任务完成后关闭原神游戏进程",
+                        variable=self.close_game_after_all_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 所有任务完成后关闭 BetterGI
+        self.close_bettergi_after_all_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("close_bettergi_after_all", False))
+        tk.Checkbutton(inner, text="所有任务完成后关闭 BetterGI 进程",
+                        variable=self.close_bettergi_after_all_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 所有任务完成后关闭胡桃工具箱
+        self.close_hutao_after_all_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("close_hutao_after_all", True))
+        tk.Checkbutton(inner, text="所有任务完成后关闭胡桃工具箱",
+                        variable=self.close_hutao_after_all_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 所有任务完成后关闭 TeyvatGuide
+        self.close_teyvatguide_after_all_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("close_teyvatguide_after_all", True))
+        tk.Checkbutton(inner, text="所有任务完成后关闭 TeyvatGuide",
+                        variable=self.close_teyvatguide_after_all_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 手动停止时关闭所有进程（独立于正常完成的三个开关）
+        self.stop_closes_all_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("stop_closes_all_processes", True))
+        tk.Checkbutton(inner, text="手动停止时关闭所有进程（游戏/BetterGI/胡桃/TeyvatGuide）",
+                        variable=self.stop_closes_all_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # 签到完成后自动关闭软件
+        self.checkin_close_app_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("checkin_close_app", False))
+        tk.Checkbutton(inner, text="签到任务完成后自动关闭签到软件（定时签到/一键签到）",
+                        variable=self.checkin_close_app_var).pack(anchor="w", padx=20, pady=(0, 10))
+
+        # ---- 任务完成后启动软件 ----
+        launch_frame = tk.LabelFrame(inner, text="任务完成后启动软件",
+                                      font=("Microsoft YaHei", 11, "bold"),
+                                      bg="#FFFFFF", fg=COLORS["text"],
+                                      padx=12, pady=8)
+        launch_frame.pack(fill="x", padx=20, pady=(10, 5))
+
+        self.launch_apps_enabled_var = tk.BooleanVar(
+            value=cfg.get("settings", {}).get("launch_apps_enabled", False))
+        tk.Checkbutton(launch_frame, text="所有任务完成后启动以下软件",
+                        variable=self.launch_apps_enabled_var,
+                        bg="#FFFFFF", fg=COLORS["text"],
+                        activebackground="#FFFFFF",
+                        selectcolor="#FFFFFF").pack(anchor="w")
+
+        # 软件路径列表
+        list_frame = tk.Frame(launch_frame, bg="#FFFFFF")
+        list_frame.pack(fill="x", pady=(5, 0))
+
+        self.launch_apps_listbox = tk.Listbox(list_frame,
+                                               bg="#F7FAFD", fg=COLORS["text"],
+                                               selectbackground=COLORS["sel_bg"],
+                                               selectforeground=COLORS["text"],
+                                               relief="flat", bd=0,
+                                               font=("Microsoft YaHei", 9),
+                                               height=5)
+        self.launch_apps_listbox.pack(fill="x", expand=True)
+
+        btn_row = tk.Frame(launch_frame, bg="#FFFFFF")
+        btn_row.pack(fill="x", pady=(5, 0))
+
+        tk.Button(btn_row, text="添加软件路径", command=self._add_launch_app,
+                  bg=COLORS["primary"], fg=COLORS["text_white"],
+                  activebackground=COLORS["primary_hover"],
+                  relief="flat", font=("Microsoft YaHei", 9),
+                  padx=12, pady=2, cursor="hand2", bd=0).pack(side="left")
+        tk.Button(btn_row, text="删除选中", command=self._del_launch_app,
+                  bg=COLORS["danger"], fg=COLORS["text_white"],
+                  activebackground="#C0392B",
+                  relief="flat", font=("Microsoft YaHei", 9),
+                  padx=12, pady=2, cursor="hand2", bd=0).pack(side="left", padx=(8, 0))
+
+        # 加载已有路径
+        self._load_launch_apps()
 
         # 8. Tesseract 安装目录 (可选)
         self.tesseract_var = tk.StringVar(
@@ -2672,6 +4108,124 @@ class SettingsDialog(tk.Toplevel):
         if uid_method != "bettergi":
             self.uid_group_frame.pack_forget()
 
+        # 进入主界面检测方式
+        ttk.Label(inner, text="进入主界面检测方式", foreground=label_fg,
+                  background=COLORS["bg"]).pack(anchor="w", **pad)
+
+        mw_detect_group = cfg.get("uid", {}).get("main_world_detect_group", "")
+
+        self.main_world_detect_frame = tk.Frame(inner, bg=COLORS["bg"])
+        self.main_world_detect_frame.pack(fill="x", padx=20, pady=(2, 5))
+        ttk.Label(self.main_world_detect_frame, text="BetterGI 调度组（选「截图检测」则不使用 BetterGI）",
+                  foreground=label_fg, background=COLORS["bg"]).pack(anchor="w")
+        self.main_world_detect_var = tk.StringVar(
+            value=mw_detect_group if mw_detect_group else "（截图检测）")
+        mw_groups = get_bettergi_groups()
+        mw_options = ["（截图检测）"] + mw_groups
+        if mw_detect_group and mw_detect_group not in mw_groups:
+            mw_options.insert(1, mw_detect_group)
+        self.mw_detect_combo = ttk.Combobox(self.main_world_detect_frame,
+                                            textvariable=self.main_world_detect_var,
+                                            values=mw_options, state="readonly")
+        self.mw_detect_combo.pack(fill="x", pady=(2, 0))
+
+        # TeyvatGuide 全局签到
+        checkin_frame = ttk.LabelFrame(inner, text="任务前签到")
+        checkin_frame.pack(fill="x", padx=4, pady=(12, 0))
+
+        self.tg_checkin_var = tk.BooleanVar(value=cfg.get("tg_checkin_before_all", False))
+        cb_tg = tk.Checkbutton(checkin_frame, text="开始所有任务前执行 TeyvatGuide 签到（一键签到全部账号）", variable=self.tg_checkin_var)
+        cb_tg.pack(anchor="w", padx=10, pady=4)
+
+        # 签到方式（一键签到按钮使用）
+        method_frame = ttk.LabelFrame(inner, text="一键签到方式")
+        method_frame.pack(fill="x", padx=4, pady=(12, 0))
+
+        self.checkin_method_var = tk.StringVar(value=cfg.get("checkin_method", "teyvatguide"))
+        rb_tg = ttk.Radiobutton(method_frame, text="TeyvatGuide 签到（CDP 一键全部）", variable=self.checkin_method_var, value="teyvatguide")
+        rb_tg.pack(anchor="w", padx=10, pady=2)
+        rb_ht = ttk.Radiobutton(method_frame, text="胡桃工具箱签到（UIA 逐个切号）", variable=self.checkin_method_var, value="hutao")
+        rb_ht.pack(anchor="w", padx=10, pady=2)
+
+        # 手动添加账号
+        add_frame = ttk.Frame(method_frame)
+        add_frame.pack(fill="x", padx=10, pady=(6, 0))
+
+        self.hutao_add_var = tk.StringVar()
+        add_entry = ttk.Entry(add_frame, textvariable=self.hutao_add_var, width=18)
+        add_entry.pack(side="left", padx=(0, 4))
+        add_btn = ttk.Button(add_frame, text="添加", command=self._add_hutao_account)
+        add_btn.pack(side="left")
+
+        # 胡桃签到账号选择列表
+        self.hutao_accounts_frame = ttk.Frame(method_frame)
+        self.hutao_accounts_frame.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+
+        canvas = tk.Canvas(self.hutao_accounts_frame, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(self.hutao_accounts_frame, orient="vertical", command=canvas.yview)
+        self.hutao_accounts_inner = ttk.Frame(canvas)
+        canvas.create_window((0, 0), window=self.hutao_accounts_inner, anchor="nw")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def _update_hutao_sett_scroll(*args):
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                canvas_h = canvas.winfo_height()
+                if content_h > canvas_h:
+                    scrollbar.pack(side="right", fill="y")
+                    canvas.configure(yscrollcommand=scrollbar.set)
+                    canvas.configure(scrollregion=bbox)
+                else:
+                    scrollbar.pack_forget()
+                    canvas.configure(yscrollcommand="")
+
+        self.hutao_accounts_inner.bind("<Configure>", _update_hutao_sett_scroll)
+        canvas.bind("<Configure>", _update_hutao_sett_scroll)
+        self._hutao_sett_update_scroll = _update_hutao_sett_scroll
+
+        self.hutao_check_vars = {}
+        self.hutao_row_frames = {}
+        # 从已有账号自动填充
+        auto_names = set()
+        for acc in cfg.get("accounts", []):
+            name = acc.get("hutao_account", "").strip()
+            if name:
+                auto_names.add(name)
+
+        # 从之前保存的手动列表恢复
+        saved = set(cfg.get("checkin_hutao_accounts", []))
+        all_names = auto_names | saved
+        for name in sorted(all_names):
+            is_auto = name in auto_names
+
+            row = ttk.Frame(self.hutao_accounts_inner)
+            row.pack(fill="x")
+            self.hutao_row_frames[name] = row
+
+            var = tk.BooleanVar(value=name in (saved if saved else auto_names))
+            self.hutao_check_vars[name] = var
+
+            cb = tk.Checkbutton(row, text=name, variable=var)
+            cb.pack(side="left")
+
+            if not is_auto:
+                del_btn = tk.Button(row, text="✕", font=("", 7), relief="flat",
+                                   bd=0, padx=3, pady=0, fg="#888",
+                                   command=lambda n=name: self._del_hutao_account(n))
+                del_btn.pack(side="right")
+
+        def _on_checkin_method_changed(*args):
+            if self.checkin_method_var.get() == "hutao":
+                self.hutao_accounts_frame.pack(fill="both", expand=True, padx=10, pady=(6, 4))
+            else:
+                self.hutao_accounts_frame.pack_forget()
+
+        self.checkin_method_var.trace_add("write", _on_checkin_method_changed)
+        if self.checkin_method_var.get() != "hutao":
+            self.hutao_accounts_frame.pack_forget()
+
         # 底部按钮
         btn_frame = tk.Frame(inner, bg=COLORS["bg"])
         btn_frame.pack(pady=(15, 15))
@@ -2691,6 +4245,40 @@ class SettingsDialog(tk.Toplevel):
         # 初始滚动条检测
         self.after(100, self._update_scrollbar)
 
+    def _add_hutao_account(self):
+        name = self.hutao_add_var.get().strip()
+        if not name:
+            return
+        if name in self.hutao_check_vars:
+            messagebox.showinfo("提示", f"账号 '{name}' 已在列表中")
+            return
+
+        row = ttk.Frame(self.hutao_accounts_inner)
+        row.pack(fill="x", before=self.hutao_accounts_inner.winfo_children()[0] if self.hutao_accounts_inner.winfo_children() else None)
+        self.hutao_row_frames[name] = row
+
+        var = tk.BooleanVar(value=True)
+        self.hutao_check_vars[name] = var
+
+        cb = tk.Checkbutton(row, text=name, variable=var)
+        cb.pack(side="left")
+
+        del_btn = tk.Button(row, text="✕", font=("", 7), relief="flat",
+                           bd=0, padx=3, pady=0, fg="#888",
+                           command=lambda n=name: self._del_hutao_account(n))
+        del_btn.pack(side="right")
+
+        self.hutao_add_var.set("")
+        self._hutao_sett_update_scroll()
+
+    def _del_hutao_account(self, name):
+        if name not in self.hutao_check_vars:
+            return
+        self.hutao_row_frames[name].destroy()
+        del self.hutao_check_vars[name]
+        del self.hutao_row_frames[name]
+        self._hutao_sett_update_scroll()
+
     def _browse_file(self, var, filetypes):
         from tkinter import filedialog
         path = filedialog.askopenfilename(filetypes=filetypes)
@@ -2703,10 +4291,288 @@ class SettingsDialog(tk.Toplevel):
         if path:
             var.set(path)
 
+    def _auto_detect_paths(self):
+        """一键自动识别游戏和工具路径，已有值的输入框不覆盖"""
+        import winreg
+
+        # 清空上次结果
+        self.status_label.config(text="")
+
+        def _search_exe(keywords, search_dirs):
+            """在指定目录列表中递归搜索文件名匹配所有关键词的 exe 文件"""
+            results = []
+            for base_dir in search_dirs:
+                if not os.path.isdir(base_dir):
+                    continue
+                # 使用 glob 递归搜索所有 exe
+                pattern = os.path.join(base_dir, "**", "*.exe")
+                for path in glob.glob(pattern, recursive=True):
+                    fname = os.path.basename(path).lower()
+                    if all(kw.lower() in fname for kw in keywords):
+                        results.append(path)
+            return results
+
+        def _resolve_shortcut(lnk_path):
+            """解析 Windows 快捷方式 (.lnk)，返回目标 exe 路径"""
+            try:
+                # 使用 WScript.Shell COM 对象解析 .lnk
+                ps_cmd = (
+                    "$wsh = New-Object -ComObject WScript.Shell; "
+                    "$lnk = $wsh.CreateShortcut('" + lnk_path + "'); "
+                    "Write-Output $lnk.TargetPath"
+                )
+                result = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", ps_cmd],
+                    capture_output=True, text=True, timeout=5,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+                target = result.stdout.strip()
+                if target and os.path.isfile(target) and target.lower().endswith(".exe"):
+                    return target
+            except Exception:
+                pass
+            return None
+
+        def _search_exe_and_shortcuts(keywords, search_dirs):
+            """在目录列表中搜索 exe，未找到则尝试解析 .lnk 快捷方式"""
+            results = _search_exe(keywords, search_dirs)
+            if results:
+                return results
+            # exe 未找到，尝试 .lnk 快捷方式
+            for base_dir in search_dirs:
+                if not os.path.isdir(base_dir):
+                    continue
+                try:
+                    for item in os.listdir(base_dir):
+                        if not item.lower().endswith(".lnk"):
+                            continue
+                        if all(kw.lower() in item.lower() for kw in keywords):
+                            target = _resolve_shortcut(os.path.join(base_dir, item))
+                            if target:
+                                results.append(target)
+                except Exception:
+                    continue
+            return results
+
+        # 收集扫描结果
+        status_lines = []
+        found_count = 0
+
+        # 环境变量 & 桌面路径
+        local_appdata = os.environ.get("LOCALAPPDATA", "")
+        appdata = os.environ.get("APPDATA", "")
+        user_desktop = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+        public_desktop = "C:\\Users\\Public\\Desktop"
+
+        # ---- 1. BetterGI.exe ----
+        if self.bettergi_exe_var.get().strip():
+            status_lines.append("- BetterGI 可执行文件 (已有值，跳过)")
+        else:
+            search_dirs = []
+            if local_appdata:
+                search_dirs.append(os.path.join(local_appdata, "Programs", "BetterGI"))
+            if appdata:
+                search_dirs.append(os.path.join(appdata, "BetterGI"))
+            for d in [user_desktop, public_desktop]:
+                if os.path.isdir(d):
+                    search_dirs.append(d)
+
+            results = _search_exe_and_shortcuts(["bettergi"], search_dirs)
+            if results:
+                bettergi_exe = results[0]
+                self.bettergi_exe_var.set(bettergi_exe)
+                status_lines.append("✓ BetterGI 可执行文件 已识别")
+                found_count += 1
+
+                # ---- 2. BetterGI config.json（与 exe 同目录） ----
+                if self.bettergi_config_var.get().strip():
+                    status_lines.append("- BetterGI 配置文件 (已有值，跳过)")
+                else:
+                    config_path = os.path.join(os.path.dirname(bettergi_exe), "config.json")
+                    if os.path.isfile(config_path):
+                        self.bettergi_config_var.set(config_path)
+                        status_lines.append("✓ BetterGI 配置文件 已识别")
+                        found_count += 1
+                    else:
+                        status_lines.append("✗ BetterGI 配置文件 未找到")
+            else:
+                status_lines.append("✗ BetterGI 可执行文件 未找到")
+                # BetterGI.exe 没找到，config 也无法定位
+                status_lines.append("✗ BetterGI 配置文件 未找到")
+
+        # ---- 3. 原神 YuanShen.exe ----
+        if self.genshin_exe_var.get().strip():
+            status_lines.append("- 原神可执行文件 (已有值，跳过)")
+        else:
+            genshin_path = None
+
+            # 3a. 注册表 Uninstall 信息
+            try:
+                uninstall_keys = [
+                    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\原神",
+                    r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\原神",
+                ]
+                for uk in uninstall_keys:
+                    try:
+                        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, uk)
+                        for field in ("InstallLocation", "DisplayIcon"):
+                            try:
+                                val, _ = winreg.QueryValueEx(key, field)
+                                if val:
+                                    candidate = (
+                                        val if val.lower().endswith(".exe")
+                                        else os.path.join(val, "YuanShen.exe")
+                                    )
+                                    if os.path.isfile(candidate):
+                                        genshin_path = candidate
+                                        break
+                            except Exception:
+                                continue
+                        winreg.CloseKey(key)
+                        if genshin_path:
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+            # 3b. 常见安装路径（多盘符搜索）
+            if not genshin_path:
+                for drive in ("C:\\", "D:\\", "E:\\", "F:\\", "G:\\"):
+                    candidate = os.path.join(
+                        drive, "Genshin Impact", "Genshin Impact Game", "YuanShen.exe")
+                    if os.path.isfile(candidate):
+                        genshin_path = candidate
+                        break
+
+            if genshin_path:
+                self.genshin_exe_var.set(genshin_path)
+                status_lines.append("✓ 原神可执行文件 已识别")
+                found_count += 1
+            else:
+                status_lines.append("✗ 原神可执行文件 未找到")
+
+        # ---- 4. 胡桃工具箱 Snap.Hutao.exe ----
+        if self.hutao_exe_var.get().strip():
+            status_lines.append("- 胡桃工具箱路径 (已有值，跳过)")
+        else:
+            search_dirs = []
+            if local_appdata:
+                search_dirs.append(os.path.join(local_appdata, "Programs", "Snap Hutao"))
+                # 考虑到某些版本直接在 Programs 下
+                search_dirs.append(os.path.join(local_appdata, "Programs"))
+            for d in [user_desktop, public_desktop]:
+                if os.path.isdir(d):
+                    search_dirs.append(d)
+
+            results = _search_exe_and_shortcuts(["snap", "hutao"], search_dirs)
+            if not results:
+                results = _search_exe_and_shortcuts(["hutao"], search_dirs)
+            if results:
+                self.hutao_exe_var.set(results[0])
+                status_lines.append("✓ 胡桃工具箱路径 已识别")
+                found_count += 1
+            else:
+                status_lines.append("✗ 胡桃工具箱路径 未找到")
+
+        # ---- 5. Tesseract OCR ----
+        if self.tesseract_var.get().strip():
+            status_lines.append("- Tesseract OCR 目录 (已有值，跳过)")
+        else:
+            tess_candidates = [
+                "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                "C:\\Program Files (x86)\\Tesseract-OCR\\tesseract.exe",
+            ]
+            found = False
+            for tp in tess_candidates:
+                if os.path.isfile(tp):
+                    self.tesseract_var.set(tp)
+                    found = True
+                    break
+            if found:
+                status_lines.append("✓ Tesseract OCR 目录 已识别")
+                found_count += 1
+            else:
+                status_lines.append("✗ Tesseract OCR 目录 未找到")
+
+        # ---- 6. 胡桃工具箱 AppID（MSIX） ----
+        if self.hutao_appid_var.get().strip():
+            status_lines.append("- 胡桃工具箱 AppID (已有值，跳过)")
+        else:
+            try:
+                result = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-StartApps | Where-Object { $_.Name -like '*胡桃*' -or $_.Name -like '*Hutao*' } | Select-Object -ExpandProperty AppId"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+                appid = result.stdout.strip()
+                if appid:
+                    self.hutao_appid_var.set(appid)
+                    status_lines.append("✓ 胡桃工具箱 AppID 已识别")
+                    found_count += 1
+                else:
+                    status_lines.append("✗ 胡桃工具箱 AppID 未找到")
+            except Exception:
+                status_lines.append("✗ 胡桃工具箱 AppID 未找到")
+
+        # ---- 7. TeyvatGuide AppID（MSIX） ----
+        if self.teyvatguide_appid_var.get().strip():
+            status_lines.append("- TeyvatGuide AppID (已有值，跳过)")
+        else:
+            try:
+                result = subprocess.run(
+                    ["powershell", "-Command",
+                     "Get-StartApps | Where-Object { $_.Name -like '*TeyvatGuide*' -or $_.Name -like '*Teyvat*' } | Select-Object -ExpandProperty AppId"],
+                    capture_output=True, text=True, timeout=10,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+                appid = result.stdout.strip()
+                if appid:
+                    self.teyvatguide_appid_var.set(appid)
+                    status_lines.append("✓ TeyvatGuide AppID 已识别")
+                    found_count += 1
+                else:
+                    status_lines.append("✗ TeyvatGuide AppID 未找到")
+            except Exception:
+                status_lines.append("✗ TeyvatGuide AppID 未找到")
+
+        # 汇总：如果全部跳过，显示提示；否则追加统计
+        if found_count == 0 and all("跳过" in line for line in status_lines):
+            status_lines.append("所有路径已设置，无需自动识别")
+        elif found_count > 0:
+            status_lines.append(
+                f"已自动填入 {found_count} 项路径，其余请手动设置")
+
+        self.status_label.config(text="\n".join(status_lines))
+
+    def _add_launch_app(self):
+        """添加启动软件路径"""
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="选择可执行文件",
+            filetypes=[("EXE 文件", "*.exe"), ("所有文件", "*.*")])
+        if path:
+            self.launch_apps_listbox.insert(tk.END, path)
+
+    def _del_launch_app(self):
+        """删除选中的启动软件路径"""
+        sel = self.launch_apps_listbox.curselection()
+        if sel:
+            self.launch_apps_listbox.delete(sel[0])
+
+    def _load_launch_apps(self):
+        """从配置加载启动软件路径列表"""
+        apps = self.cfg.get("settings", {}).get("launch_apps_after_all", [])
+        for app in apps:
+            self.launch_apps_listbox.insert(tk.END, app)
+
     def _detect_hotkey(self, target="stop"):
         def on_detected(hotkey_str):
             if target == "pause":
                 self.pause_hotkey_var.set(hotkey_str)
+            elif target == "start":
+                self.start_hotkey_var.set(hotkey_str)
             else:
                 self.hotkey_var.set(hotkey_str)
         HotkeyDetectDialog(self, on_detected)
@@ -2725,19 +4591,36 @@ class SettingsDialog(tk.Toplevel):
         self.cfg["genshin"]["process_name"] = self.genshin_proc_var.get().strip()
         self.cfg["snap_hutao"]["exe"] = self.hutao_exe_var.get().strip()
         self.cfg["snap_hutao"]["app_id"] = self.hutao_appid_var.get().strip()
+        self.cfg.setdefault("teyvatguide", {})
+        self.cfg["teyvatguide"]["app_id"] = self.teyvatguide_appid_var.get().strip()
         self.cfg["monitor"]["max_wait_seconds"] = self.timeout_var.get()
         self.cfg.setdefault("tesseract", {})
         self.cfg["tesseract"]["path"] = self.tesseract_var.get().strip()
         self.cfg.setdefault("hotkeys", {})
         self.cfg["hotkeys"]["stop"] = self.hotkey_var.get().strip()
         self.cfg["hotkeys"]["pause"] = self.pause_hotkey_var.get().strip()
+        self.cfg["hotkeys"]["start"] = self.start_hotkey_var.get().strip()
         self.cfg.setdefault("settings", {})
         self.cfg["settings"]["auto_minimize"] = self.auto_minimize_var.get()
         self.cfg["settings"]["minimize_on_close"] = self.minimize_on_close_var.get()
         self.cfg["settings"]["auto_shutdown"] = self.auto_shutdown_var.get()
+        self.cfg["settings"]["close_game_after_all"] = self.close_game_after_all_var.get()
+        self.cfg["settings"]["close_bettergi_after_all"] = self.close_bettergi_after_all_var.get()
+        self.cfg["settings"]["close_hutao_after_all"] = self.close_hutao_after_all_var.get()
+        self.cfg["settings"]["close_teyvatguide_after_all"] = self.close_teyvatguide_after_all_var.get()
+        self.cfg["settings"]["stop_closes_all_processes"] = self.stop_closes_all_var.get()
+        self.cfg["settings"]["checkin_close_app"] = self.checkin_close_app_var.get()
+        self.cfg["settings"]["launch_apps_enabled"] = self.launch_apps_enabled_var.get()
+        self.cfg["settings"]["launch_apps_after_all"] = list(self.launch_apps_listbox.get(0, tk.END))
         self.cfg.setdefault("uid", {})
         self.cfg["uid"]["method"] = self.uid_method_var.get()
         self.cfg["uid"]["bettergi_group"] = self.uid_group_var.get().strip()
+        mw_detect_val = self.main_world_detect_var.get().strip()
+        self.cfg["uid"]["main_world_detect_group"] = "" if mw_detect_val == "（截图检测）" else mw_detect_val
+        self.cfg["tg_checkin_before_all"] = self.tg_checkin_var.get()
+        self.cfg["checkin_method"] = self.checkin_method_var.get()
+        if self.checkin_method_var.get() == "hutao":
+            self.cfg["checkin_hutao_accounts"] = [name for name, var in self.hutao_check_vars.items() if var.get()]
         save_config(self.cfg)
         self.result = True
         self.destroy()
@@ -2756,6 +4639,9 @@ class CalendarDialog(tk.Toplevel):
     def __init__(self, parent, multi_select=False, selected_dates=None,
                  title="选择日期", callback=None):
         super().__init__(parent)
+        # 清除 Tkinter 默认图标
+        self.tk.call("wm", "iconbitmap", self._w, "-default", _gen_blank_ico())
+        self.iconbitmap(_gen_blank_ico())
         self.multi_select = multi_select
         self.selected = set(selected_dates or [])
         self.callback = callback
@@ -2950,13 +4836,13 @@ class SchedulerDialog(tk.Toplevel):
 
     def __init__(self, parent, gui):
         super().__init__(parent)
+        # 清除 Tkinter 默认图标
+        self.tk.call("wm", "iconbitmap", self._w, "-default", _gen_blank_ico())
+        self.iconbitmap(_gen_blank_ico())
         self.gui = gui
         self.cfg = load_scheduler_config()
 
         self.title("定时任务管理")
-        ico = _gen_icon()
-        if ico:
-            self.iconbitmap(ico)
         self.minsize(500, 300)
         self.resizable(True, True)
         self.geometry("650x580")
@@ -3302,6 +5188,13 @@ class SchedulerDialog(tk.Toplevel):
         else:
             tk.Label(self.acct_inner, text="（暂无账号）", bg="#FFFFFF",
                      fg=COLORS["text_light"], font=("Microsoft YaHei", 9)).pack(anchor="w", padx=4)
+
+        # 胡桃签到勾选
+        self.hutao_checkin_var = tk.BooleanVar(value=False)
+        self.hutao_checkin_var.trace_add("write", self._on_hutao_checkin_toggled)
+        hutao_checkin_cb = ttk.Checkbutton(add_frame,
+            text="启动后在胡桃工具箱进行米游社签到", variable=self.hutao_checkin_var)
+        hutao_checkin_cb.pack(fill="x", padx=10, pady=(8, 0))
 
         # 调度组 + 添加按钮同行
         bot_row = tk.Frame(add_frame, bg="#FFFFFF")
@@ -3863,6 +5756,8 @@ class SchedulerDialog(tk.Toplevel):
         }
         import uuid
         schedule["id"] = uuid.uuid4().hex[:8]
+        schedule["hutao_checkin"] = self.hutao_checkin_var.get()
+        schedule["hutao_accounts"] = self._get_hutao_checkin_accounts() if self.hutao_checkin_var.get() else []
 
         if mode == "once":
             date_str = self.date_var.get().strip()
@@ -3913,6 +5808,34 @@ class SchedulerDialog(tk.Toplevel):
         self.refresh_btn()
         if self.gui.tray:
             self.gui._rebuild_tray_menu()
+
+    def _get_selected_accounts(self):
+        """返回当前勾选的账号名列表"""
+        return [name for name, var in self._acct_vars.items() if var.get()]
+
+    def _get_hutao_checkin_accounts(self):
+        """获取勾选胡桃签到时应签到的 hutao_account 列表"""
+        selected = self._get_selected_accounts()
+        cfg = load_config()
+        result = []
+        for name in selected:
+            acc = next((a for a in cfg.get("accounts", []) if a.get("name") == name), None)
+            if acc and acc.get("type") == "hutao" and acc.get("hutao_account", "").strip():
+                result.append(acc["hutao_account"].strip())
+        return result
+
+    def _on_hutao_checkin_toggled(self, *args):
+        if self.hutao_checkin_var.get():
+            selected = self._get_selected_accounts()
+            cfg = load_config()
+            missing = []
+            for name in selected:
+                acc = next((a for a in cfg.get("accounts", []) if a.get("name") == name), None)
+                if acc and acc.get("type") == "hutao" and not acc.get("hutao_account", "").strip():
+                    missing.append(name)
+            if missing:
+                messagebox.showwarning("提示",
+                    f"以下账号未配置米游社名称，请先到账号管理中填写：\n{', '.join(missing)}")
 
     def _delete_selected(self):
         # 收集勾选任务的 ID（基于当前快照）
@@ -4029,15 +5952,1187 @@ class SchedulerDialog(tk.Toplevel):
 
 
 # ============================================================
+# TeyvatGuide 签到核心函数（CDP WebSocket 注入方案）
+# ============================================================
+
+def _run_checkin(log_func=None, stop_event=None, pause_event=None):
+    """通过 TeyvatGuide 执行多账号米游社签到（CDP WebSocket 注入方案）。
+
+    流程：启动 TeyvatGuide → 等待 CDP 端口 → 连接 WebSocket →
+          通过 Runtime.evaluate 导航到实用脚本 → 点击一键执行全部账号
+
+    参数:
+        log_func: 日志回调函数
+        stop_event: threading.Event，set 时中断签到流程并返回 False
+        pause_event: threading.Event，set=运行 / clear=暂停
+    返回 True/False。
+    """
+    def log(msg):
+        if log_func:
+            log_func(msg)
+
+    def _should_stop():
+        return stop_event and stop_event.is_set()
+
+    def _sleep(seconds):
+        """可中断的 sleep：每 0.5 秒检查 stop_event 和 pause_event"""
+        for _ in range(int(seconds * 2)):
+            if _should_stop():
+                return True
+            if pause_event:
+                pause_event.wait(0.5)
+            time.sleep(0.5)
+        return False
+
+    # ---- CDP 辅助函数 ----
+    try:
+        import websocket
+    except ImportError:
+        log("[签到] [!] websocket-client 未安装，请执行: pip install websocket-client")
+        return False
+
+    try:
+        import requests as _requests
+    except ImportError:
+        log("[签到] [!] requests 未安装，请执行: pip install requests")
+        return False
+
+    def _cdp_get_targets(timeout=10):
+        """获取所有 CDP 调试目标"""
+        resp = _requests.get("http://127.0.0.1:9222/json", timeout=timeout)
+        return resp.json()
+
+    def _cdp_send(ws_conn, method, params=None, timeout=20):
+        """发送 CDP 命令并等待匹配 id 的响应。"""
+        msg_id = int(time.time() * 1000) % 999999
+        msg = json.dumps({"id": msg_id, "method": method, "params": params or {}})
+        try:
+            ws_conn.send(msg)
+        except Exception as e:
+            log(f"[签到] [!] CDP 发送失败: {e}")
+            return None
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if _should_stop():
+                return None
+            try:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                ws_conn.settimeout(remaining)
+                raw = ws_conn.recv()
+                resp = json.loads(raw)
+                if resp.get("id") == msg_id:
+                    return resp.get("result")
+            except websocket.WebSocketTimeoutException:
+                break
+            except OSError:
+                break
+            except Exception as e:
+                log(f"[签到] [!] CDP 接收异常: {e}")
+                break
+        return None
+
+    def _cdp_evaluate(ws_conn, expression, timeout=20):
+        """执行 JavaScript 表达式并返回结果。"""
+        result = _cdp_send(ws_conn, "Runtime.evaluate", {
+            "expression": expression,
+            "returnByValue": True,
+        }, timeout=timeout)
+        if result is None:
+            return None
+        return result.get("result", {}).get("value")
+
+    def _drain_events(ws_conn, duration=1.0):
+        """排空 WebSocket 缓冲中的残留事件。"""
+        deadline = time.time() + duration
+        try:
+            ws_conn.settimeout(0.3)
+            while time.time() < deadline:
+                try:
+                    ws_conn.recv()
+                except websocket.WebSocketTimeoutException:
+                    break
+                except Exception:
+                    break
+        except Exception:
+            pass
+
+    def _cdp_collect_console(ws_conn, duration=10.0):
+        """收集指定时间内 Runtime.consoleAPICalled 事件中的控制台消息。"""
+        messages = []
+        deadline = time.time() + duration
+        try:
+            ws_conn.settimeout(0.5)
+        except Exception:
+            pass
+        while time.time() < deadline:
+            if _should_stop():
+                break
+            try:
+                remaining = max(0.1, deadline - time.time())
+                ws_conn.settimeout(min(remaining, 1.0))
+                raw = ws_conn.recv()
+                msg = json.loads(raw)
+                if msg.get("method") == "Runtime.consoleAPICalled":
+                    args = msg.get("params", {}).get("args", [])
+                    texts = []
+                    for a in (args or []):
+                        if a.get("type") == "string":
+                            texts.append(a.get("value", ""))
+                        else:
+                            desc = a.get("description", "")
+                            if desc:
+                                texts.append(desc)
+                    if texts:
+                        messages.append(" ".join(texts))
+            except websocket.WebSocketTimeoutException:
+                continue
+            except OSError:
+                break
+            except Exception:
+                continue
+        return messages
+
+    # ============================================================
+    # 主流程
+    # ============================================================
+    # ---- 启动 TeyvatGuide（防重复）----
+    if find_proc("TeyvatGuide.exe"):
+        log("[签到] TeyvatGuide 已在运行，跳过启动")
+        hwnd = find_and_activate_window_by_process("TeyvatGuide.exe")
+        if hwnd:
+            log("[签到] TeyvatGuide 窗口已置顶")
+        else:
+            log("[签到] 未找到 TeyvatGuide 窗口（可能已最小化到托盘）")
+    else:
+        log("[签到] 正在启动 TeyvatGuide...")
+        tg_app_id = get_teyvatguide_app_id()
+        try:
+            subprocess.Popen(
+                ["explorer.exe", f"shell:AppsFolder\\{tg_app_id}"],
+                shell=True,
+            )
+        except Exception as e:
+            log(f"[签到] [!] 启动 TeyvatGuide 失败: {e}")
+            return False
+
+    if _should_stop():
+        log("[签到] 用户取消，签到终止")
+        return False
+
+    # ---- 等待 CDP 端口 9222 就绪 ----
+    log("[签到] 等待 CDP 调试端口 (127.0.0.1:9222) 就绪（最多 120 秒）...")
+    cdp_ready = False
+    for attempt in range(60):
+        if _should_stop():
+            log("[签到] 用户取消，签到终止")
+            return False
+        try:
+            resp = _requests.get("http://127.0.0.1:9222/json/version", timeout=2)
+            if resp.status_code == 200:
+                log(f"[签到] CDP 端口就绪 (第 {attempt+1} 次尝试)")
+                cdp_ready = True
+                break
+        except Exception:
+            pass
+        _sleep(2)
+
+    if not cdp_ready:
+        log("[签到] [!] CDP 端口 9222 超时未就绪（120 秒）")
+        log("[签到] 请确认已设置环境变量: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9222 --remote-allow-origins=*")
+        log("[签到] 或以管理员身份运行: setx WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS \"--remote-debugging-port=9222 --remote-allow-origins=*\"")
+        return False
+
+    # 等待 TeyvatGuide 完全加载（WebView2 初始化需要时间）
+    log("[签到] 等待 TeyvatGuide 界面加载...")
+    _sleep(5)
+
+    if _should_stop():
+        log("[签到] 用户取消，签到终止")
+        return False
+
+    # ---- 查找 TeyvatGuide 页面 ----
+    log("[签到] 查找 TeyvatGuide CDP 目标页面...")
+    ws_url = None
+    for retry in range(10):
+        if _should_stop():
+            return False
+        try:
+            targets = _cdp_get_targets(timeout=5)
+            for t in targets:
+                if t.get("type") == "page" and "tauri.localhost" in t.get("url", ""):
+                    ws_url = t["webSocketDebuggerUrl"]
+                    log(f"[签到] 找到 TeyvatGuide 页面: {t['url']}")
+                    break
+            if ws_url:
+                break
+            log(f"[签到] 未找到 TeyvatGuide 页面 (retry={retry+1}/10), CDP目标数={len(targets)}")
+        except Exception as e:
+            log(f"[签到] 查询 CDP 目标异常: {e} (retry={retry+1}/10)")
+        _sleep(2)
+    else:
+        log("[签到] [!] 未找到 TeyvatGuide 页面，请确认 TeyvatGuide 已启动并处于前台")
+        return False
+
+    # ---- 连接 WebSocket ----
+    log("[签到] 连接 CDP WebSocket...")
+    try:
+        ws = websocket.create_connection(ws_url, timeout=15, enable_multithread=True)
+    except Exception as e:
+        log(f"[签到] [!] WebSocket 连接失败: {e}")
+        return False
+
+    try:
+        # 启用 Runtime 域
+        log("[签到] 启用 CDP Runtime 域...")
+        if _cdp_send(ws, "Runtime.enable") is None:
+            log("[签到] [!] Runtime.enable 失败")
+            ws.close()
+            return False
+
+        # 排空初始化事件
+        _drain_events(ws, 1.5)
+
+        # ---- Step 1: 导航到「实用脚本」 ----
+        log("[签到] 导航到「实用脚本」页面...")
+
+        nav_js = """(function() {
+    var link = document.querySelector('a[href="/user/scripts"]');
+    if (link) {
+        link.click();
+        return 'clicked';
+    }
+    return 'not_found';
+})()"""
+
+        nav_result = _cdp_evaluate(ws, nav_js, timeout=20)
+        log(f"[签到] 点击「实用脚本」结果: {nav_result}")
+
+        if nav_result != "clicked":
+            log("[签到] [!] 未找到「实用脚本」链接，TeyvatGuide 可能尚未完全加载")
+            ws.close()
+            return False
+
+        # 等待页面切换
+        log("[签到] 等待页面切换...")
+        for _ in range(20):  # 最多等 10 秒
+            if _should_stop():
+                ws.close()
+                return False
+            _sleep(0.5)
+            url_val = _cdp_evaluate(ws, "window.location.href", timeout=5)
+            if url_val and "/user/scripts" in str(url_val):
+                log(f"[签到] 页面已切换到: {url_val}")
+                break
+        else:
+            # 兜底：直接设置 location
+            log("[签到] 页面未自动切换，使用直接导航兜底...")
+            _cdp_evaluate(ws, 'window.location.href = "/user/scripts"', timeout=10)
+            _sleep(3)
+
+        if _should_stop():
+            ws.close()
+            return False
+
+        # ---- Step 2: 点击「一键执行全部账号」 ----
+        log("[签到] 查找「一键执行全部账号」按钮...")
+
+        click_js = """(function() {
+    var buttons = document.querySelectorAll('button');
+    for (var i = 0; i < buttons.length; i++) {
+        var text = (buttons[i].textContent || '').trim();
+        if (text === '一键执行全部账号') {
+            buttons[i].click();
+            return JSON.stringify({clicked: true, text: text});
+        }
+    }
+    return JSON.stringify({clicked: false, buttonCount: buttons.length});
+})()"""
+
+        click_result = _cdp_evaluate(ws, click_js, timeout=20)
+        log(f"[签到] 点击按钮结果: {click_result}")
+
+        if click_result:
+            try:
+                click_data = json.loads(click_result)
+                if not click_data.get("clicked"):
+                    log(f"[签到] [!] 未找到「一键执行全部账号」按钮 (找到 {click_data.get('buttonCount', 0)} 个按钮)")
+                    ws.close()
+                    return False
+            except json.JSONDecodeError:
+                pass
+
+        log("[签到] 已点击「一键执行全部账号」")
+
+        if _should_stop():
+            ws.close()
+            return False
+
+        # ---- Step 3: 监控控制台确认签到已触发 ----
+        log("[签到] 监控签到执行进度 (最多 15 秒)...")
+        console_msgs = _cdp_collect_console(ws, 15.0)
+
+        signin_related = 0
+        for msg in console_msgs:
+            if "[TGHttps]" in msg:
+                signin_related += 1
+
+        if signin_related > 0:
+            log(f"[签到] 检测到 {signin_related} 条签到 API 请求，签到完成")
+        elif len(console_msgs) > 0:
+            log(f"[签到] 检测到 {len(console_msgs)} 条控制台输出，签到已触发")
+        else:
+            log("[签到] 签到已触发")
+
+        ws.close()
+        return True
+
+    except Exception as e:
+        log(f"[签到] [!] CDP 操作异常: {e}")
+        import traceback
+        log(f"[签到] 详细: {traceback.format_exc()}")
+        try:
+            ws.close()
+        except Exception:
+            pass
+        return False
+
+
+# ============================================================
+# 胡桃工具箱签到（UIA 方式）
+# ============================================================
+
+def _run_hutao_checkin(log_func=None, stop_event=None, accounts=None, pause_event=None):
+    """胡桃工具箱签到（UIA 方式）：逐个账号切换并签到"""
+    import time
+    import uiautomation as auto
+    import pythoncom
+    pythoncom.CoInitialize()
+
+    def log(msg):
+        if log_func:
+            log_func(msg)
+
+    def _should_stop():
+        return stop_event and stop_event.is_set()
+
+    def _sleep(seconds):
+        """可中断的 sleep：每 0.5 秒检查 stop_event 和 pause_event"""
+        for _ in range(int(seconds * 2)):
+            if _should_stop():
+                return True
+            if pause_event:
+                pause_event.wait(0.5)
+            time.sleep(0.5)
+        return False
+
+    def _find_checkin_button(window):
+        """在当前窗口中精确查找 name='签到' 的 ButtonControl，返回 (control, is_enabled) 或 None"""
+        try:
+            # 先定位内容区 PaneControl (DesktopChildSiteBridge)
+            content_pane = None
+            for child in window.GetChildren():
+                if child.ClassName == "Microsoft.UI.Content.DesktopChildSiteBridge":
+                    content_pane = child
+                    break
+            search_root = content_pane if content_pane else window
+            for control, depth in auto.WalkControl(search_root, maxDepth=12):
+                if control.ControlTypeName == "ButtonControl":
+                    name = control.Name or ""
+                    if name == "签到":
+                        is_enabled = True
+                        try:
+                            is_enabled = control.IsEnabled
+                        except Exception:
+                            pass
+                        return control, is_enabled
+        except Exception as e:
+            log(f"  [UIA] _find_checkin_button 异常: {e}")
+        return None
+
+    def _click_home_button(window):
+        """在左侧边栏中找 name='主页' 的项并点击，返回是否成功"""
+        try:
+            # 先定位内容区 PaneControl (DesktopChildSiteBridge)
+            content_pane = None
+            for child in window.GetChildren():
+                if child.ClassName == "Microsoft.UI.Content.DesktopChildSiteBridge":
+                    content_pane = child
+                    break
+            if content_pane:
+                # 从内容区搜索主页按钮
+                for control, depth in auto.WalkControl(content_pane, maxDepth=10):
+                    name = control.Name or ""
+                    if name == "主页":
+                        control.Click()
+                        return True
+        except Exception as e:
+            log(f"  [UIA] _click_home_button 异常: {e}")
+        log("  调试: 未找到主页按钮，打印 UIA 树前 3 层...")
+        try:
+            search_root = content_pane if content_pane else window
+            for control, d in auto.WalkControl(search_root, maxDepth=4):
+                if d > 3:
+                    continue
+                ct = control.ControlTypeName
+                name = control.Name or ""
+                if name.strip():
+                    indent = "  " * d
+                    log(f"  {indent}[{ct}] name='{name}'")
+        except Exception as e:
+            log(f"  [UIA] _click_home_button 异常: {e}")
+        return False
+
+    if not accounts:
+        log("胡桃签到: 无账号需要签到")
+        pythoncom.CoUninitialize()
+        return False
+
+    log(f"=== 胡桃签到开始，共 {len(accounts)} 个账号 ===")
+
+    # 1. 启动/查找胡桃窗口
+    hutao_win = find_hutao_window()
+    need_launch = not hutao_win
+
+    if need_launch:
+        log("胡桃未运行，正在启动...")
+        cfg = load_config()
+        hutao_app_id = cfg.get("snap_hutao", {}).get("app_id", "")
+        hutao_exe = cfg.get("snap_hutao", {}).get("exe", "")
+        if hutao_app_id:
+            start_msix_app(hutao_app_id)
+        elif hutao_exe:
+            start_exe(hutao_exe)
+        else:
+            log("错误: 未配置胡桃启动路径")
+            pythoncom.CoUninitialize()
+            return False
+
+        # 等待窗口出现
+        for i in range(15):
+            if _should_stop():
+                log("签到已停止")
+                pythoncom.CoUninitialize()
+                return False
+            time.sleep(1)
+            hutao_win = find_hutao_window()
+            if hutao_win:
+                break
+
+        if not hutao_win:
+            log("错误: 胡桃启动超时")
+            pythoncom.CoUninitialize()
+            return False
+
+        log("等待胡桃初始化...")
+        if _sleep(5):
+            log("签到已停止")
+            pythoncom.CoUninitialize()
+            return False
+    else:
+        log("胡桃已在运行")
+
+    activate_hutao_window()
+    if _sleep(1):
+        log("签到已停止")
+        pythoncom.CoUninitialize()
+        return False
+
+    # 2. 逐个账号签到
+    success_count = 0
+    fail_count = 0
+
+    for i, target_account in enumerate(accounts):
+        if _should_stop():
+            log("签到已停止")
+            break
+
+        log(f"[{i+1}/{len(accounts)}] 签到账号: {target_account}")
+
+        # 3a. 检查当前账号，必要时切换
+        current_name = None
+        acct_ctrl = None
+        hutao_win = find_hutao_window()
+        if hutao_win:
+            hwnd_ctrl = auto.ControlFromHandle(hutao_win["hwnd"])
+            result = _find_hutao_current_account(hutao_win, hwnd_ctrl)
+            if result:
+                acct_ctrl, current_name = result
+        log(f"  当前账号: {current_name}")
+
+        if current_name != target_account:
+            log(f"  正在切换账号...")
+            # 点击当前账号名，弹出切换列表
+            if acct_ctrl:
+                try:
+                    acct_ctrl.GetInvokePattern().Invoke()
+                except Exception:
+                    acct_ctrl.Click()
+                _sleep(1.5)
+            success = _click_hutao_account_popup(hutao_win, target_account, log)
+            if not success:
+                log(f"  错误: 未找到账号 '{target_account}' 在弹出列表中")
+                fail_count += 1
+                continue
+
+            # 关弹窗 → 回主页
+            hutao_win2 = find_hutao_window()
+            if hutao_win2:
+                if _sleep(1):
+                    log("签到已停止")
+                    break
+                # 点击窗口空白区域关弹窗（中心偏右避开侧栏）
+                window = auto.ControlFromHandle(hutao_win2["hwnd"])
+                rect = window.BoundingRectangle
+                cx = rect.left + int(rect.width() * 0.7)
+                cy = rect.top + int(rect.height() * 0.5)
+                auto.Click(cx, cy)
+                if _sleep(0.5):
+                    log("签到已停止")
+                    break
+                # 回到主页
+                if not _click_home_button(window):
+                    log("  警告: 无法确认在主页")
+                if _sleep(1):
+                    log("签到已停止")
+                    break
+
+            # 验证切换结果
+            hutao_win = find_hutao_window()
+            if hutao_win:
+                hwnd_ctrl = auto.ControlFromHandle(hutao_win["hwnd"])
+                result = _find_hutao_current_account(hutao_win, hwnd_ctrl)
+                current_account = result[1] if result else None
+            else:
+                current_account = None
+            if current_account != target_account:
+                log(f"  警告: 切换后账号为 '{current_account}'，期望 '{target_account}'")
+
+        # 3b. 等待页面刷新（WebView2 渲染有延迟）
+        if _sleep(2):
+            log("签到已停止")
+            break
+
+        # 3c. 查找签到按钮
+        hutao_win = find_hutao_window()
+        if not hutao_win:
+            log("  错误: 胡桃窗口丢失")
+            fail_count += 1
+            continue
+
+        window = auto.ControlFromHandle(hutao_win["hwnd"])
+
+        # 确保在主页
+        if not _click_home_button(window):
+            log("  警告: 无法确认在主页，直接搜索签到按钮...")
+        window = auto.ControlFromHandle(hutao_win["hwnd"])
+        if _sleep(3):
+            log("签到已停止")
+            break
+
+        sign_result = _find_checkin_button(window)
+        if not sign_result:
+            log(f"  未找到签到按钮，可能不在主页或界面异常")
+            fail_count += 1
+            continue
+
+        sign_btn, is_enabled = sign_result
+        log(f"  找到签到按钮, IsEnabled={is_enabled}")
+
+        if not is_enabled:
+            log(f"  已签到（按钮灰色不可点击），跳过")
+            success_count += 1
+            continue
+
+        # 点击签到按钮
+        try:
+            invoke = sign_btn.GetInvokePattern()
+            invoke.Invoke()
+            log("  已点击签到按钮（Invoke），等待服务器响应...")
+        except Exception:
+            try:
+                rect = sign_btn.BoundingRectangle
+                cx = rect.left + rect.width() // 2
+                cy = rect.top + rect.height() // 2
+                auto.Click(cx, cy)
+                log("  已点击签到按钮（物理坐标），等待服务器响应...")
+            except Exception as e:
+                log(f"  点击签到按钮失败: {e}")
+                fail_count += 1
+                continue
+
+        # 等待服务器处理
+        if _sleep(3):
+            log("签到已停止")
+            break
+
+        # 重新获取窗口句柄，避免 UIA 树过期
+        hutao_win = find_hutao_window()
+        if not hutao_win:
+            log("  无法验证签到结果，胡桃窗口丢失")
+            fail_count += 1
+            continue
+        window = auto.ControlFromHandle(hutao_win["hwnd"])
+
+        # 验证签到结果：按钮应变为不可点击
+        sign_result2 = _find_checkin_button(window)
+        if sign_result2:
+            _, is_enabled2 = sign_result2
+            if not is_enabled2:
+                log(f"  签到成功（按钮已变灰）")
+                success_count += 1
+            else:
+                log(f"  签到可能失败（按钮仍可点击），计入失败")
+                fail_count += 1
+        else:
+            log(f"  无法验证签到结果，按钮已消失")
+            fail_count += 1
+
+        if _sleep(1):
+            log("签到已停止")
+            break
+
+    log(f"=== 胡桃签到结束: 成功 {success_count}/{len(accounts)}, 失败 {fail_count} ===")
+    pythoncom.CoUninitialize()
+    return success_count > 0
+
+
+# ============================================================
+# CheckinScheduleDialog - 定时签到设置对话框
+# ============================================================
+
+class CheckinScheduleDialog:
+    """定时签到设置弹窗：时间选择 + 已有签到任务管理"""
+
+    def __init__(self, parent, gui):
+        self.gui = gui
+        self.dlg = tk.Toplevel(parent)
+        # 清除 Tkinter 默认图标
+        self.dlg.tk.call("wm", "iconbitmap", self.dlg._w, "-default", _gen_blank_ico())
+        self.dlg.iconbitmap(_gen_blank_ico())
+        self.dlg.title("定时签到")
+        self.dlg.geometry("550x600")
+        self.dlg.minsize(450, 400)
+        self.dlg.resizable(True, True)
+        self.dlg.configure(bg=COLORS["bg"])
+        self.dlg.transient(parent)
+        self.dlg.grab_set()
+
+        # 外层 Canvas + 自适应滚动条
+        self.outer_canvas = tk.Canvas(self.dlg, bg=COLORS["bg"],
+                                       highlightthickness=0, bd=0)
+        self.outer_scrollbar = ttk.Scrollbar(self.dlg, orient="vertical",
+                                              command=self.outer_canvas.yview)
+
+        self.content = tk.Frame(self.outer_canvas, bg=COLORS["bg"])
+        self.outer_canvas.create_window((0, 0), window=self.content,
+                                         anchor="nw", tags="content")
+
+        def _update_outer_scroll(*args):
+            self.outer_canvas.update_idletasks()
+            bbox = self.outer_canvas.bbox("all")
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                canvas_h = self.outer_canvas.winfo_height()
+                if content_h > canvas_h:
+                    self.outer_scrollbar.pack(side="right", fill="y")
+                    self.outer_canvas.configure(yscrollcommand=self.outer_scrollbar.set)
+                    self.outer_canvas.configure(scrollregion=bbox)
+                else:
+                    self.outer_scrollbar.pack_forget()
+                    self.outer_canvas.configure(yscrollcommand="")
+
+        self.content.bind("<Configure>", _update_outer_scroll)
+        self.outer_canvas.bind("<Configure>", _update_outer_scroll)
+
+        self.outer_canvas.pack(side="left", fill="both", expand=True)
+
+        def _on_mousewheel(event):
+            bbox = self.outer_canvas.bbox("all")
+            if not bbox:
+                return
+            content_h = bbox[3] - bbox[1]
+            visible_h = self.outer_canvas.winfo_height()
+            if content_h > visible_h:
+                self.outer_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self.outer_canvas.bind("<MouseWheel>", _on_mousewheel)
+        self.outer_canvas.bind("<Enter>",
+            lambda e: self.outer_canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self.outer_canvas.bind("<Leave>",
+            lambda e: self.outer_canvas.unbind_all("<MouseWheel>"))
+
+        self._build()
+
+    def _build(self):
+        # === 签到任务设置 LabelFrame ===
+        outer = tk.LabelFrame(self.content, text="签到任务设置", bg=COLORS["bg"],
+                               fg=COLORS["text"], font=("Microsoft YaHei", 10, "bold"))
+        outer.pack(fill="x", padx=20, pady=(12, 0))
+
+        # 签到方式 RadioButton
+        self.checkin_type_var = tk.StringVar(value="teyvatguide")
+        self.checkin_type_var.trace_add("write", self._on_checkin_type_changed)
+        rb1 = tk.Radiobutton(outer, text="TeyvatGuide 签到（CDP 方式，自动一键全部账号）",
+                             variable=self.checkin_type_var, value="teyvatguide",
+                             bg=COLORS["bg"])
+        rb1.pack(anchor="w", padx=10, pady=(8, 1))
+        rb2 = tk.Radiobutton(outer, text="胡桃工具箱签到（UIA 方式，逐个账号切换签到）",
+                             variable=self.checkin_type_var, value="hutao",
+                             bg=COLORS["bg"])
+        rb2.pack(anchor="w", padx=10, pady=(1, 4))
+
+        # 胡桃账号选择区域（默认隐藏）
+        self.hutao_accounts_frame = tk.LabelFrame(outer, text="签到账号（米游社名称）",
+                                                   bg=COLORS["bg"],
+                                                   fg=COLORS["text"],
+                                                   font=("Microsoft YaHei", 9, "bold"))
+
+        # 手动添加账号
+        add_frame = tk.Frame(self.hutao_accounts_frame, bg=COLORS["bg"])
+        add_frame.pack(fill="x", padx=10, pady=(4, 0))
+
+        self.dlg.hutao_add_var = tk.StringVar()
+        add_entry = tk.Entry(add_frame,
+                             textvariable=self.dlg.hutao_add_var,
+                             font=("Microsoft YaHei", 9), width=18)
+        add_entry.pack(side="left", padx=(0, 4))
+        add_btn = tk.Button(add_frame, text="添加",
+                            command=self._dlg_add_hutao_account,
+                            bg=COLORS["primary"], fg=COLORS["text_white"],
+                            font=("Microsoft YaHei", 9), padx=8,
+                            relief="flat", cursor="hand2", bd=0)
+        add_btn.pack(side="left")
+
+        # 账号勾选列表（带滚动条）
+        list_frame = tk.Frame(self.hutao_accounts_frame, bg=COLORS["bg"])
+        list_frame.pack(fill="both", expand=True, padx=10, pady=(4, 4))
+
+        canvas = tk.Canvas(list_frame, bg=COLORS["bg"],
+                           highlightthickness=0, bd=0)
+        scrollbar = tk.Scrollbar(list_frame, orient="vertical", command=canvas.yview)
+        inner = tk.Frame(canvas, bg=COLORS["bg"])
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        def _update_hutao_scroll(*args):
+            canvas.update_idletasks()
+            bbox = canvas.bbox("all")
+            if bbox:
+                content_h = bbox[3] - bbox[1]
+                canvas_h = canvas.winfo_height()
+                if content_h > canvas_h:
+                    scrollbar.pack(side="right", fill="y")
+                    canvas.configure(yscrollcommand=scrollbar.set)
+                    canvas.configure(scrollregion=bbox)
+                else:
+                    scrollbar.pack_forget()
+                    canvas.configure(yscrollcommand="")
+
+        inner.bind("<Configure>", _update_hutao_scroll)
+        canvas.bind("<Configure>", _update_hutao_scroll)
+
+        self.dlg.hutao_check_vars = {}
+        self.dlg.hutao_row_frames = {}
+        self.dlg.hutao_canvas = canvas
+        self.dlg.hutao_inner = inner
+        self.dlg.hutao_update_scroll = _update_hutao_scroll
+
+        # 从已有账号自动填充（所有有 hutao_account 的账号，不限类型、默认全选）
+        auto_names = set()
+        for acc in load_config().get("accounts", []):
+            name = acc.get("hutao_account", "").strip()
+            if name:
+                auto_names.add(name)
+
+        for name in sorted(auto_names):
+            self._dlg_make_hutao_row(name, is_auto=True, checked=True)
+
+        # 时间选择行
+        time_frame = tk.Frame(outer, bg=COLORS["bg"])
+        time_frame.pack(fill="x", padx=10, pady=(8, 8))
+
+        self.hour_var = tk.StringVar(value="08")
+        self.minute_var = tk.StringVar(value="00")
+        self._trace_suppress = False
+        self._prev_hour = self.hour_var.get()
+        self._prev_minute = self.minute_var.get()
+
+        tk.Label(time_frame, text="执行时间：", bg=COLORS["bg"],
+                 fg=COLORS["text"], font=("Microsoft YaHei", 10)).pack(side="left")
+
+        # 小时区
+        tk.Button(time_frame, text="◀", command=lambda: self._adj_hour(-1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left", padx=(4, 1))
+        ttk.Combobox(time_frame, textvariable=self.hour_var, width=3,
+                     values=[f"{h:02d}" for h in range(24)],
+                     state="normal", font=("Microsoft YaHei", 11)).pack(side="left")
+        tk.Button(time_frame, text="▶", command=lambda: self._adj_hour(1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left")
+        tk.Label(time_frame, text="时", bg=COLORS["bg"],
+                 fg=COLORS["text"], font=("Microsoft YaHei", 9)).pack(side="left", padx=(2, 8))
+
+        # 分钟区
+        tk.Button(time_frame, text="◀", command=lambda: self._adj_minutes(-1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left", padx=(0, 1))
+        ttk.Combobox(time_frame, textvariable=self.minute_var, width=3,
+                     values=[f"{m:02d}" for m in range(60)],
+                     state="normal", font=("Microsoft YaHei", 11)).pack(side="left")
+        tk.Button(time_frame, text="▶", command=lambda: self._adj_minutes(1),
+                  bg="#EEF2F7", fg=COLORS["text"], relief="flat",
+                  font=("Microsoft YaHei", 8), padx=3, cursor="hand2", bd=0,
+                  width=2).pack(side="left")
+        tk.Label(time_frame, text="分", bg=COLORS["bg"],
+                 fg=COLORS["text"], font=("Microsoft YaHei", 9)).pack(side="left")
+
+        self.hour_var.trace_add("write", self._validate_hour)
+        self.minute_var.trace_add("write", self._validate_minute)
+
+        # 添加按钮
+        self.btn_frame = tk.Frame(outer, bg=COLORS["bg"])
+        self.btn_frame.pack(pady=(8, 10))
+
+        tk.Button(self.btn_frame, text="添加定时签到", command=self._add_schedule,
+                  bg=COLORS["primary"], fg=COLORS["text_white"],
+                  font=("Microsoft YaHei", 10), padx=20, pady=5,
+                  relief="flat", cursor="hand2", bd=0).pack()
+
+        # === 已有签到任务 ===
+        tk.Label(self.content, text="已有的签到任务：", bg=COLORS["bg"],
+                 fg=COLORS["text"], font=("Microsoft YaHei", 9, "bold")).pack(
+                     anchor="w", padx=20, pady=(10, 4))
+
+        # 滚动列表区域
+        list_frame = tk.Frame(self.content, bg=COLORS["bg"])
+        list_frame.pack(fill="both", expand=True, padx=20, pady=(0, 8))
+
+        self.checkin_canvas = tk.Canvas(list_frame, bg="#FFFFFF", highlightthickness=0)
+        self.checkin_scroll = ttk.Scrollbar(list_frame, orient="vertical",
+                                             command=self.checkin_canvas.yview)
+        self.checkin_canvas.configure(yscrollcommand=self.checkin_scroll.set)
+        self.checkin_canvas.pack(side="left", fill="both", expand=True)
+
+        self.checkin_inner = tk.Frame(self.checkin_canvas, bg="#FFFFFF")
+        self._checkin_window_id = self.checkin_canvas.create_window(
+            (0, 0), window=self.checkin_inner, anchor="nw")
+
+        def _on_checkin_inner_resize(event):
+            self.checkin_canvas.configure(scrollregion=self.checkin_canvas.bbox("all"))
+            self.dlg.after(50, self._update_checkin_scrollbar)
+        self.checkin_inner.bind("<Configure>", _on_checkin_inner_resize)
+
+        def _on_checkin_canvas_configure(event):
+            self.checkin_canvas.itemconfig(self._checkin_window_id, width=event.width)
+            self.dlg.after(50, self._update_checkin_scrollbar)
+        self.checkin_canvas.bind("<Configure>", _on_checkin_canvas_configure)
+
+        def _checkin_mousewheel(event):
+            if not self.checkin_canvas.winfo_exists():
+                return
+            bbox = self.checkin_canvas.bbox("all")
+            if bbox and bbox[3] > self.checkin_canvas.winfo_height():
+                self.checkin_canvas.yview_scroll(int(-event.delta / 120), "units")
+        self.checkin_canvas.bind("<MouseWheel>", _checkin_mousewheel)
+        self.checkin_inner.bind("<MouseWheel>", _checkin_mousewheel)
+
+        self._load_list()
+
+    def _set_time(self, h, m):
+        self._trace_suppress = True
+        self.hour_var.set(h)
+        self.minute_var.set(m)
+        self._trace_suppress = False
+
+    def _validate_hour(self, *args):
+        if self._trace_suppress:
+            return
+        val = self.hour_var.get()
+        if not val:
+            self._prev_hour = ""
+            return
+        if not val.isdigit() or int(val) > 23 or len(val) > 2:
+            self._trace_suppress = True
+            self.hour_var.set(self._prev_hour)
+            self._trace_suppress = False
+        else:
+            self._prev_hour = val
+
+    def _validate_minute(self, *args):
+        if self._trace_suppress:
+            return
+        val = self.minute_var.get()
+        if not val:
+            self._prev_minute = ""
+            return
+        if not val.isdigit() or int(val) > 59 or len(val) > 2:
+            self._trace_suppress = True
+            self.minute_var.set(self._prev_minute)
+            self._trace_suppress = False
+        else:
+            self._prev_minute = val
+
+    def _adj_hour(self, delta):
+        try:
+            h = int(self.hour_var.get())
+        except ValueError:
+            h = 0
+        h = (h + delta) % 24
+        self._trace_suppress = True
+        self.hour_var.set(f"{h:02d}")
+        self._trace_suppress = False
+        self._prev_hour = f"{h:02d}"
+
+    def _adj_minutes(self, delta):
+        try:
+            m = int(self.minute_var.get())
+        except ValueError:
+            m = 0
+        m = (m + delta) % 60
+        self._trace_suppress = True
+        self.minute_var.set(f"{m:02d}")
+        self._trace_suppress = False
+        self._prev_minute = f"{m:02d}"
+
+    def _add_schedule(self):
+        try:
+            h = int(self.hour_var.get())
+            m = int(self.minute_var.get())
+        except ValueError:
+            messagebox.showwarning("提示", "请输入正确的时间")
+            return
+        if not (0 <= h <= 23 and 0 <= m <= 59):
+            messagebox.showwarning("提示", "请输入正确的时间")
+            return
+
+        time_str = f"{h:02d}:{m:02d}"
+
+        # 检查重复
+        cfg = load_checkin_schedule()
+        for s in cfg["checkins"]:
+            if s["time"] == time_str:
+                messagebox.showwarning("提示", f"已存在 {time_str} 的定时签到任务")
+                return
+
+        # 生成唯一 ID
+        import uuid
+        task_id = f"checkin_{uuid.uuid4().hex[:8]}"
+
+        new_task = {
+            "id": task_id,
+            "time": time_str,
+            "schedule_type": "daily",
+            "enabled": True,
+            "label": f"每日签到 {time_str}",
+            "date": "",
+            "weekdays": [],
+            "dates": [],
+            "checkin_type": self.checkin_type_var.get(),
+            "hutao_accounts": self._get_selected_hutao_accounts(),
+        }
+
+        # 胡桃签到需至少选一个账号
+        if new_task["checkin_type"] == "hutao" and not new_task["hutao_accounts"]:
+            messagebox.showwarning("提示", "请至少选择一个签到账号")
+            return
+
+        cfg["checkins"].append(new_task)
+        save_checkin_schedule(cfg)
+        self.gui._log(f"[签到] 已添加定时签到: 每天 {time_str}")
+
+        # 启动独立签到调度器
+        self.gui.start_checkin_scheduler()
+
+        self._load_list()
+        if self.gui.tray:
+            self.gui.root.after(0, self.gui._rebuild_tray_menu)
+
+    def _delete_schedule(self, entry_id):
+        """删除指定签到条目（通过 id 直接定位）"""
+        cfg = load_checkin_schedule()
+        before_count = len(cfg["checkins"])
+        cfg["checkins"] = [c for c in cfg["checkins"] if c.get("id") != entry_id]
+        after_count = len(cfg["checkins"])
+        if after_count < before_count:
+            save_checkin_schedule(cfg)
+            self.gui._log(f"[签到] 已删除定时签到条目")
+        self._load_list()
+        if self.gui.tray:
+            self.gui.root.after(0, self.gui._rebuild_tray_menu)
+
+    def _update_checkin_scrollbar(self):
+        """签到任务列表：内容超出时显示滚动条"""
+        if not self.checkin_canvas.winfo_exists():
+            return
+        bbox = self.checkin_canvas.bbox("all")
+        if bbox and bbox[3] > self.checkin_canvas.winfo_height():
+            self.checkin_scroll.pack(side="right", fill="y")
+            self.checkin_canvas.pack(side="left", fill="both", expand=True)
+        else:
+            self.checkin_scroll.pack_forget()
+            self.checkin_canvas.pack(fill="both", expand=True)
+
+    def _load_list(self):
+        """加载签到任务列表（frame 列表 + 启停按钮）"""
+        for w in self.checkin_inner.winfo_children():
+            w.destroy()
+
+        cfg = load_checkin_schedule()
+        checkins = cfg.get("checkins", [])
+
+        if not checkins:
+            tk.Label(self.checkin_inner, text="（暂无签到任务）", bg="#FFFFFF",
+                     fg=COLORS["text_light"],
+                     font=("Microsoft YaHei", 10)).pack(pady=20)
+            self.dlg.after(50, self._update_checkin_scrollbar)
+            return
+
+        for i, c in enumerate(checkins):
+            time_str = c.get("time", "??:??")
+            checkin_type = c.get("checkin_type", "teyvatguide")
+            type_label = "胡桃" if checkin_type == "hutao" else "TG"
+            enabled = c.get("enabled", True)
+            entry_id = c.get("id", "")
+
+            row = tk.Frame(self.checkin_inner, bg="#FFFFFF")
+            row.pack(fill="x", pady=1)
+
+            desc_label = tk.Label(row, text=f"每天 {time_str} ({type_label})",
+                                  anchor="w", bg="#FFFFFF", fg=COLORS["text"],
+                                  font=("Microsoft YaHei", 10))
+            desc_label.pack(side="left", padx=(8, 4), fill="x", expand=True)
+
+            # 删除按钮
+            del_btn = tk.Button(row, text="删除",
+                                command=lambda eid=entry_id: self._delete_schedule(eid),
+                                bg=COLORS["danger"], fg=COLORS["text_white"],
+                                font=("Microsoft YaHei", 9), padx=8,
+                                relief="flat", cursor="hand2", bd=0)
+            del_btn.pack(side="right", padx=(4, 2), pady=3)
+
+            # 启停按钮
+            btn_text = "停用" if enabled else "启用"
+            btn_color = "#E74C3C" if enabled else "#52C41A"
+            btn_active = "#C0392B" if enabled else "#389E0D"
+
+            def make_toggle(idx=i):
+                def toggle():
+                    cfg2 = load_checkin_schedule()
+                    chk = cfg2["checkins"]
+                    if idx < len(chk):
+                        new_state = not chk[idx].get("enabled", True)
+                        chk[idx]["enabled"] = new_state
+                        save_checkin_schedule(cfg2)
+                        if new_state:
+                            self.gui.start_checkin_scheduler()
+                            self.gui._log(f"[签到] 任务已启用: {chk[idx].get('time', '??:??')}")
+                        else:
+                            # 检查是否所有任务都已停用
+                            cfg3 = load_checkin_schedule()
+                            if not any(c2.get("enabled", True) for c2 in cfg3.get("checkins", [])):
+                                self.gui.stop_checkin_scheduler()
+                            self.gui._log(f"[签到] 任务已停用: {chk[idx].get('time', '??:??')}")
+                    self._load_list()
+                    if self.gui.tray:
+                        self.gui.root.after(0, self.gui._rebuild_tray_menu)
+                return toggle
+
+            toggle_btn = tk.Button(row, text=btn_text, command=make_toggle(),
+                                   bg=btn_color, fg="#FFFFFF",
+                                   activebackground=btn_active,
+                                   relief="flat", font=("Microsoft YaHei", 9),
+                                   width=5, cursor="hand2", bd=0)
+            toggle_btn.pack(side="right", padx=(2, 8), pady=3)
+
+            # 分隔线
+            if i < len(checkins) - 1:
+                tk.Frame(self.checkin_inner, height=1, bg="#E1E8F0").pack(
+                    fill="x", padx=10, pady=2)
+
+        self.dlg.after(50, self._update_checkin_scrollbar)
+
+    def _dlg_make_hutao_row(self, name, is_auto=False, checked=True):
+        """在列表内创建一行胡桃账号"""
+        inner = self.dlg.hutao_inner
+        row = tk.Frame(inner, bg=COLORS["bg"])
+        row.pack(fill="x", anchor="w")
+        self.dlg.hutao_row_frames[name] = row
+
+        var = tk.BooleanVar(value=checked)
+        self.dlg.hutao_check_vars[name] = var
+
+        cb = tk.Checkbutton(row, text=name, variable=var,
+                            bg=COLORS["bg"])
+        cb.pack(side="left", anchor="w")
+
+        if not is_auto:
+            del_btn = tk.Button(row, text="✕",
+                                command=lambda n=name: self._dlg_del_hutao_account(n),
+                                bg=COLORS["bg"], fg=COLORS["danger"],
+                                font=("Microsoft YaHei", 9),
+                                relief="flat", cursor="hand2", bd=0, padx=4)
+            del_btn.pack(side="right", padx=(0, 4))
+
+        self.dlg.hutao_update_scroll()
+
+    def _dlg_add_hutao_account(self):
+        """手动添加胡桃账号到列表"""
+        name = self.dlg.hutao_add_var.get().strip()
+        if not name:
+            return
+        if name in self.dlg.hutao_check_vars:
+            messagebox.showwarning("提示", f"账号「{name}」已存在")
+            return
+        self.dlg.hutao_add_var.set("")
+        self._dlg_make_hutao_row(name, is_auto=False, checked=True)
+
+    def _dlg_del_hutao_account(self, name):
+        """删除手动添加的胡桃账号行"""
+        row = self.dlg.hutao_row_frames.get(name)
+        if row is None:
+            return
+        row.destroy()
+        del self.dlg.hutao_row_frames[name]
+        del self.dlg.hutao_check_vars[name]
+        self.dlg.hutao_update_scroll()
+
+    def _get_hutao_account_options(self):
+        """从 config.json 获取所有可用的胡桃账号名（不限类型）"""
+        cfg = load_config()
+        result = []
+        for acc in cfg.get("accounts", []):
+            name = acc.get("hutao_account", "").strip()
+            if name:
+                result.append(name)
+        return result
+
+    def _get_selected_hutao_accounts(self):
+        return [name for name, var in self.dlg.hutao_check_vars.items() if var.get()]
+
+    def _on_checkin_type_changed(self, *args):
+        if self.checkin_type_var.get() == "hutao":
+            self.hutao_accounts_frame.pack(fill="both", expand=True, pady=(4, 0),
+                                           before=self.btn_frame)
+        else:
+            self.hutao_accounts_frame.pack_forget()
+
+
+# ============================================================
 # GenshinMultiAccountToolGUI - 主界面（从 pyc 反汇编重建）
 # ============================================================
 
 class GenshinMultiAccountToolGUI:
-    """原神多账号辅助工具 v5.4 - 主界面"""
+    """原神多账号辅助工具 v5.5 - 主界面"""
 
     def __init__(self, root):
         self.root = root
-        self.root.title("GenshinMultiAccountTool v5.4")
+        self.root.title("GenshinMultiAccountTool v5.5")
         self.root.geometry("960x600")
         self.root.minsize(700, 500)
         self.root.configure(bg=COLORS["bg"])
@@ -4045,6 +7140,7 @@ class GenshinMultiAccountToolGUI:
         self.cfg = load_config()
         self.worker = None
         self.log_queue = queue.Queue()
+        self._log_poll_interval = 100  # ms，空闲时动态增加到 500
         self.stop_event = threading.Event()
         self.pause_event = threading.Event()  # 暂停事件：set=运行, clear=暂停
         self.pause_event.set()  # 初始为运行状态
@@ -4056,13 +7152,30 @@ class GenshinMultiAccountToolGUI:
         self.scheduler_thread = None
         self._shutdown_pending = False
 
-        # 热键相关（孤儿方法需要）
-        self._hotkey_stop_registered = None
-        self._hotkey_pause_registered = None
+        # 签到线程控制
+        self.checkin_stop_event = None  # 签到线程的停止信号
+        self.checkin_thread = None
+
+        # 独立定时签到调度器
+        self.checkin_scheduler_event = threading.Event()  # set=停止, clear=运行
+        self.checkin_scheduler_thread = None
+        self.checkin_scheduler_enabled = False  # 总开关
+
+        # 任务执行互斥锁：定时计划与定时签到不可同时运行
+        self.task_exec_lock = threading.Lock()
+
+        # 热键相关
+        self._hotkey_ids = {}       # hotkey_name → atom_id
+        self._hotkey_atoms = {}     # atom_id → hotkey_name
+        self._hotkey_thread = None
+        self._hotkey_ready = threading.Event()
+        self._hotkey_reload = threading.Event()
+        self._pending_hotkeys = []
 
         # 系统托盘
         self.tray = None
         self._quitting = False
+        self._hotkey_stop_event = threading.Event()
         if HAS_TRAY:
             self._setup_tray()
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -4072,6 +7185,10 @@ class GenshinMultiAccountToolGUI:
         self._load_accounts()
         self._poll_log()
         self._register_hotkey()
+
+        # 自动启动独立签到调度器（若配置中 enabled 为 True）
+        if load_checkin_schedule().get("enabled", False):
+            self.start_checkin_scheduler()
 
     def _setup_styles(self):
         style = ttk.Style()
@@ -4156,7 +7273,7 @@ class GenshinMultiAccountToolGUI:
         title_lbl.pack(side="left")
 
         version_lbl = tk.Label(self.title_bar,
-                               text=" v5.4 ",
+                               text=" v5.5 ",
                                bg=COLORS["primary_dark"],
                                fg="#A0C8E8",
                                font=("Microsoft YaHei", 9))
@@ -4170,7 +7287,7 @@ class GenshinMultiAccountToolGUI:
         self.topmost_btn.bind("<Button-1>", lambda e: self._toggle_title_topmost())
         self._topmost_active = False
 
-        self.title_scheduler_btn = tk.Label(self.title_bar, text="定时计划", cursor="hand2",
+        self.title_scheduler_btn = tk.Label(self.title_bar, text="定时任务", cursor="hand2",
                                             bg=COLORS["primary_dark"], fg=COLORS["text_white"],
                                             font=("Microsoft YaHei", 10))
         self.title_scheduler_btn.pack(side="right", padx=1)
@@ -4181,6 +7298,18 @@ class GenshinMultiAccountToolGUI:
                                            font=("Microsoft YaHei", 10))
         self.title_settings_btn.pack(side="right", padx=1)
         self.title_settings_btn.bind("<Button-1>", lambda e: self._open_settings())
+
+        self.title_checkin_schedule_btn = tk.Label(self.title_bar, text="定时签到", cursor="hand2",
+                                                    bg=COLORS["primary_dark"], fg=COLORS["text_white"],
+                                                    font=("Microsoft YaHei", 10))
+        self.title_checkin_schedule_btn.pack(side="right", padx=1)
+        self.title_checkin_schedule_btn.bind("<Button-1>", lambda e: self._open_checkin_schedule())
+
+        self.title_checkin_btn = tk.Label(self.title_bar, text="一键签到", cursor="hand2",
+                                           bg=COLORS["primary_dark"], fg=COLORS["text_white"],
+                                           font=("Microsoft YaHei", 10))
+        self.title_checkin_btn.pack(side="right", padx=1)
+        self.title_checkin_btn.bind("<Button-1>", lambda e: self._do_checkin())
 
         # 底部状态栏（先于主区域打包，缩小窗口不会被隐藏）
         status_bar = tk.Frame(self.root, bg=COLORS["primary_dark"])
@@ -4398,10 +7527,15 @@ class GenshinMultiAccountToolGUI:
             info_frame.pack(side="left", fill="x", padx=3, pady=3)
 
             acc_type = acc.get("type", "direct")
-            type_label = "直接启动" if acc_type == "direct" else "胡桃启动"
-            type_color = (COLORS["primary"]
-                          if acc_type == "direct"
-                          else COLORS["warning"])
+            if acc_type == "direct":
+                type_label = "直接启动"
+                type_color = COLORS["primary"]
+            elif acc_type == "tg_cdp":
+                type_label = "TeyvatGuide"
+                type_color = COLORS["success"]
+            else:
+                type_label = "胡桃启动"
+                type_color = COLORS["warning"]
 
             name_lbl = tk.Label(info_frame, text=name,
                                 bg=COLORS["panel_bg"],
@@ -4412,8 +7546,10 @@ class GenshinMultiAccountToolGUI:
             detail = (f"{type_label}  |  配置: "
                       f"{acc.get('config_name', '')}")
             if acc_type == "hutao":
-                detail += (f"  |  胡桃: "
+                detail += (f"  |  米游社: "
                            f"{acc.get('hutao_account', '')}")
+            elif acc_type == "tg_cdp":
+                detail += f"  |  UID: {acc.get('uid', '')}"
 
             detail_lbl = tk.Label(info_frame, text=detail,
                                   bg=COLORS["panel_bg"],
@@ -4613,11 +7749,73 @@ class GenshinMultiAccountToolGUI:
         self.root.wait_window(dlg)
         if dlg.result is not None:
             self.cfg = load_config()
+            self._register_hotkey()
             self._log("设置已保存")
 
     def _open_scheduler(self):
         """打开定时计划对话框"""
         self.scheduler_dialog = SchedulerDialog(self.root, self)
+
+    def _do_checkin(self):
+        """一键签到：在后台线程中执行签到流程"""
+        if not HAS_UIA:
+            messagebox.showinfo("提示",
+                "签到功能需要 uiautomation 库，请先安装：\npip install uiautomation")
+            return
+
+        # 若已有签到线程在运行，先停止旧的
+        if self.checkin_stop_event:
+            self.checkin_stop_event.set()
+            self._log("[签到] 中断之前的签到线程")
+        self.checkin_stop_event = threading.Event()
+
+        cfg = load_config()
+        def _checkin_wrapper(target_func, *args):
+            self.root.after(0, self._minimize_to_tray)
+            try:
+                target_func(*args)
+            finally:
+                self.checkin_stop_event = None
+                self.root.after(0, lambda: (self.root.deiconify(), self.root.lift(), self.root.focus_force()))
+                self.root.after(0, lambda: self.pause_btn.config(state="disabled", bg="#E0E4E8",
+                                      fg=COLORS["text_light"]))
+                self.root.after(0, lambda: self.stop_btn.config(state="disabled", bg="#E8E8E8",
+                                     fg=COLORS["text"]))
+                if load_config().get("settings", {}).get("checkin_close_app", False):
+                    self._log("[签到] checkin_close_app=True, 正在关闭签到软件...")
+                    ck_method = load_config().get("checkin_method", "teyvatguide")
+                    if ck_method == "hutao":
+                        kill_proc("Snap.Hutao.Remastered.exe")
+                        kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
+                    else:
+                        kill_proc("TeyvatGuide.exe")
+
+        if cfg.get("checkin_method", "teyvatguide") == "hutao":
+            hutao_names = cfg.get("checkin_hutao_accounts", [])
+            if hutao_names:
+                self.checkin_thread = threading.Thread(
+                    target=_checkin_wrapper,
+                    args=(_run_hutao_checkin, self._log, self.checkin_stop_event, hutao_names, self.pause_event),
+                    daemon=True)
+            else:
+                self._log("没有勾选任何米游社账号，无法执行签到")
+                return
+        else:
+            self.checkin_thread = threading.Thread(
+                target=_checkin_wrapper,
+                args=(_run_checkin, self._log, self.checkin_stop_event, self.pause_event),
+                daemon=True)
+        self.pause_btn.config(state="normal", bg="#F0AD4E",
+                              fg=COLORS["text_white"],
+                              activebackground="#EC971F")
+        self.stop_btn.config(state="normal", bg=COLORS["danger"],
+                             fg=COLORS["text_white"],
+                             activebackground="#C0392B")
+        self.checkin_thread.start()
+
+    def _open_checkin_schedule(self):
+        """打开定时签到设置对话框"""
+        self.checkin_dialog = CheckinScheduleDialog(self.root, self)
 
     def _auto_start_scheduler(self):
         """开机自启动：静默启动定时器（不弹警告）"""
@@ -4634,82 +7832,452 @@ class GenshinMultiAccountToolGUI:
 
 
     def _scheduler_loop(self):
-        """定时器后台线程：每分钟检查一次时间，到点直接启动主程序一条龙
-        支持三种模式: daily(每天), weekly(每周), once(一次性)
-        """
-        last_triggered = {}  # key=schedule id, value=最后触发的日期
+        """定时器后台线程：精确触发 + 补偿 + 30秒轮询兜底
 
-        while not self.scheduler_event.wait(60):
+        计算距离下一次定时触发还有多少秒，精确等待到点触发。
+        每次循环记录 last_check 时间，若检测到时间跳跃 > 90秒
+        （系统休眠/挂起恢复），扫描所有调度补偿执行错过的触发。
+        保留 30 秒轮询作为兜底。
+        """
+        last_triggered = {}  # key=schedule id, value=最后触发的日期字符串
+        fallback_interval = 30  # 兜底轮询间隔
+        last_check = datetime.now()
+
+        while not self.scheduler_event.is_set():
             cfg = load_scheduler_config()
             now = datetime.now()
-            current_time = now.strftime("%H:%M")
-            current_date = now.strftime("%Y-%m-%d")
-            current_weekday = now.isoweekday()  # 1=周一, 7=周日
 
-            for i, schedule in enumerate(cfg["schedules"]):
-                if not schedule.get("enabled", True):
+            # ---- 检测时间跳跃（系统休眠恢复），补偿错过触发 ----
+            gap = (now - last_check).total_seconds()
+            if gap > 90:
+                self._compensate_missed(last_check, now, cfg, last_triggered)
+
+            # 找到下一次触发时间（所有调度中最早的）
+            next_trigger = self._find_next_trigger(now, cfg, last_triggered)
+
+            if next_trigger is not None:
+                wait_seconds = (next_trigger - datetime.now()).total_seconds()
+                if wait_seconds > 0:
+                    actual_wait = min(wait_seconds, fallback_interval)
+                    if self.scheduler_event.wait(actual_wait):
+                        break  # shutdown 信号
+                    now = datetime.now()
+
+                # 检查是否到达/错过了触发时间
+                if now >= next_trigger:
+                    self._check_and_trigger(now, cfg, last_triggered)
+            else:
+                # 没有可触发的调度，兜底等待
+                if self.scheduler_event.wait(fallback_interval):
+                    break
+
+            last_check = datetime.now()
+
+    def _checkin_scheduler_loop(self):
+        """定时签到后台线程：精确触发 + 30秒轮询兜底
+
+        独立于定时器调度器，仅负责触发签到（_run_checkin）。
+        每次循环读 load_checkin_schedule()，若总开关 enabled 为 False
+        则短暂等待后继续；否则遍历启用的签到条目，找到最近触发时间精确等待。
+        检测到时间跳跃 > 90秒（系统休眠恢复）时做补偿。
+        """
+        last_check = time.time()
+        while not self.checkin_scheduler_event.is_set():
+            try:
+                cfg = load_checkin_schedule()
+                if not cfg.get("enabled", False):
+                    self.checkin_scheduler_event.wait(1.0)
                     continue
-                if schedule["time"] != current_time:
+
+                checkins = [c for c in cfg.get("checkins", []) if c.get("enabled", True)]
+                if not checkins:
+                    self.checkin_scheduler_event.wait(5.0)
                     continue
 
-                stype = schedule.get("schedule_type", "daily")
+                now = time.time()
+                gap = now - last_check
+                if gap > 90:
+                    last_check = now  # 时间跳跃，补偿
 
-                # ---- 一次性模式 ----
-                if stype == "once":
-                    sched_date = schedule.get("date", "")
-                    if sched_date != current_date:
+                # 找最近的下一个触发时间
+                _now = datetime.now()
+                next_trigger = None
+                for c in checkins:
+                    t = self._schedule_next_time(_now, c, 0, {})
+                    if t is None:
                         continue
-                    # 检查是否已执行过
-                    if schedule.get("last_run") == current_date:
-                        continue
-                    schedule["last_run"] = current_date
-                    save_scheduler_config(cfg)
+                    if next_trigger is None or t < next_trigger:
+                        next_trigger = t
 
-                # ---- 每周模式 ----
-                elif stype == "weekly":
-                    wds = schedule.get("weekdays", [])
-                    if current_weekday not in wds:
-                        continue
-                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
-                        continue
+                if next_trigger is None:
+                    self.checkin_scheduler_event.wait(30.0)
+                    continue
 
-                # ---- 指定日期模式 ----
-                elif stype == "dates":
-                    sched_dates = schedule.get("dates", [])
-                    if current_date not in sched_dates:
-                        continue
-                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
-                        continue
+                wait_seconds = max(0, (next_trigger - datetime.now()).total_seconds())
+                if wait_seconds > 0:
+                    self.checkin_scheduler_event.wait(min(wait_seconds, 30.0))
+                    if self.checkin_scheduler_event.is_set():
+                        break
+                    continue
 
-                # ---- 每天模式 ----
-                else:  # daily
-                    if last_triggered.get(schedule.get("id", str(i))) == current_date:
-                        continue
+                # 触发签到 - 找出当前时间已到的所有条目
+                _now2 = datetime.now()
+                triggered_entries = []
+                for c in checkins:
+                    t = self._schedule_next_time(_now2, c, 0, {})
+                    if t is not None and t <= _now2:
+                        triggered_entries.append(c)
 
-                last_triggered[schedule.get("id", str(i))] = current_date
+                if not triggered_entries:
+                    # 兜底：用 next_trigger 最近的条目
+                    for c in checkins:
+                        t = self._schedule_next_time(_now2, c, 0, {})
+                        if t is not None and (next_trigger is None or t <= next_trigger):
+                            triggered_entries = [c]
+                            break
 
-                accts = schedule.get("accounts", [])
-                sched_groups = schedule.get("scheduler_groups", "")
+                if not triggered_entries:
+                    last_check = time.time()
+                    self.checkin_scheduler_event.wait(2.0)
+                    continue
 
-                def trigger(accts=accts, grp=sched_groups):
-                    self._log(f"[定时器] 到点 {current_time}，自动执行: {', '.join(accts)}")
+                # 获取互斥锁，若有定时计划任务正在执行则等待
+                self.task_exec_lock.acquire()
 
-                    if self.running:
-                        self._log("[定时器] 当前正在执行中，跳过")
-                        return
+                checkin_threads = []
+                for entry in triggered_entries:
+                    checkin_type = entry.get("checkin_type", "teyvatguide")
+                    if checkin_type == "hutao":
+                        self._log(f"[定时签到] 触发胡桃签到")
+                        t = threading.Thread(
+                            target=_run_hutao_checkin,
+                            args=(self._log, self.checkin_scheduler_event, entry.get("hutao_accounts", [])),
+                            daemon=True
+                        )
+                    else:
+                        self._log(f"[定时签到] 触发 TeyvatGuide 签到")
+                        t = threading.Thread(
+                            target=_run_checkin,
+                            args=(self._log, self.checkin_scheduler_event),
+                            daemon=True
+                        )
+                    t.start()
+                    checkin_threads.append(t)
 
-                    for name, var in self.account_vars.items():
-                        var.set(name in accts)
+                for t in checkin_threads:
+                    t.join(timeout=300)
 
-                    if grp:
-                        for acc in self.cfg.get("accounts", []):
-                            if acc["name"] in accts:
-                                acc["scheduler_groups"] = grp
-                        save_config(self.cfg)
+                self.root.after(0, lambda: self.pause_btn.config(state="disabled", bg="#E0E4E8",
+                                                                        fg=COLORS["text_light"]))
+                self.root.after(0, lambda: self.stop_btn.config(state="disabled", bg="#E8E8E8",
+                                                                 fg=COLORS["text"]))
 
-                    self._start()
+                if load_config().get("settings", {}).get("checkin_close_app", False):
+                    ck_method = load_config().get("checkin_method", "teyvatguide")
+                    target = "胡桃" if ck_method == "hutao" else "TeyvatGuide"
+                    self._log(f"[定时签到] 签到完成，自动关闭{target}")
+                    if ck_method == "hutao":
+                        kill_proc("Snap.Hutao.Remastered.exe")
+                        kill_proc("Snap.Hutao.Remastered.FullTrust.exe")
+                    else:
+                        kill_proc("TeyvatGuide.exe")
+                    self.task_exec_lock.release()
+                    return
 
-                self.root.after(0, trigger)
+                self.task_exec_lock.release()
+
+                last_check = time.time()
+                self.checkin_scheduler_event.wait(2.0)  # 短暂休息避免重复触发
+            except Exception:
+                self.checkin_scheduler_event.wait(5.0)
+
+    def start_checkin_scheduler(self):
+        """启动独立签到调度器，遵循 Event 安全协议"""
+        # 先停止旧线程
+        if not self.checkin_scheduler_event.is_set():
+            self.checkin_scheduler_event.set()
+            if self.checkin_scheduler_thread and self.checkin_scheduler_thread.is_alive():
+                self.checkin_scheduler_thread.join(timeout=2)
+        self.checkin_scheduler_event.clear()
+        self.checkin_scheduler_enabled = True
+        self.checkin_scheduler_thread = threading.Thread(
+            target=self._checkin_scheduler_loop, daemon=True
+        )
+        self.checkin_scheduler_thread.start()
+        cfg = load_checkin_schedule()
+        cfg["enabled"] = True
+        save_checkin_schedule(cfg)
+
+    def stop_checkin_scheduler(self):
+        """停止独立签到调度器"""
+        self.checkin_scheduler_event.set()
+        self.checkin_scheduler_enabled = False
+        cfg = load_checkin_schedule()
+        cfg["enabled"] = False
+        save_checkin_schedule(cfg)
+        self._log("[定时签到] 调度器已停止")
+
+    def _toggle_checkin_scheduler(self, enable):
+        """托盘菜单回调：切换签到总开关"""
+        if enable:
+            self.start_checkin_scheduler()
+        else:
+            self.stop_checkin_scheduler()
+        self._pending_rebuild = True
+        self.root.after(0, self._refresh_scheduler_ui)
+
+    def _toggle_checkin_entry(self, entry):
+        """托盘菜单回调：切换单个签到条目的启用状态"""
+        def toggle(icon, item):
+            cfg = load_checkin_schedule()
+            for c in cfg["checkins"]:
+                if c.get("id") == entry.get("id"):
+                    c["enabled"] = not c.get("enabled", True)
+                    break
+            save_checkin_schedule(cfg)
+            # 根据是否还有启用的条目自动启停签到调度器
+            if any(c.get("enabled", True) for c in cfg["checkins"]):
+                if self.checkin_scheduler_event.is_set():
+                    self.start_checkin_scheduler()
+            else:
+                self.stop_checkin_scheduler()
+            self._pending_rebuild = True
+            self.root.after(0, self._refresh_scheduler_ui)
+        return toggle
+
+    def _find_next_trigger(self, now, cfg, last_triggered):
+        """计算所有调度中下一次触发时间（最早的），返回 datetime 或 None"""
+        next_t = None
+        for i, s in enumerate(cfg["schedules"]):
+            if not s.get("enabled", True):
+                continue
+            t = self._schedule_next_time(now, s, i, last_triggered)
+            if t and (next_t is None or t < next_t):
+                next_t = t
+        return next_t
+
+    @staticmethod
+    def _schedule_next_time(now, s, idx, last_triggered):
+        """计算单个调度的下一次触发时间，返回 datetime 或 None"""
+        stype = s.get("schedule_type", "daily")
+        try:
+            h, m = map(int, s["time"].split(":"))
+        except (ValueError, AttributeError):
+            return None
+        trigger_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
+        sched_id = s.get("id", str(idx))
+
+        if stype == "daily":
+            if trigger_today <= now:
+                trigger_today += timedelta(days=1)
+            return trigger_today
+
+        if stype == "weekly":
+            wds = s.get("weekdays", [])
+            if not wds:
+                return None
+            for days_ahead in range(8):
+                check = now + timedelta(days=days_ahead)
+                check_trigger = check.replace(hour=h, minute=m, second=0, microsecond=0)
+                if check.isoweekday() in wds and check_trigger > now:
+                    return check_trigger
+            return None
+
+        if stype == "once":
+            sched_date = s.get("date", "")
+            if sched_date:
+                try:
+                    dt = datetime.strptime(f"{sched_date} {s['time']}", "%Y-%m-%d %H:%M")
+                    if dt > now:
+                        return dt
+                except ValueError:
+                    pass
+            return None
+
+        if stype == "dates":
+            dates = s.get("dates", [])
+            for d in sorted(dates):
+                try:
+                    dt = datetime.strptime(f"{d} {s['time']}", "%Y-%m-%d %H:%M")
+                    if dt > now:
+                        return dt
+                except ValueError:
+                    continue
+            return None
+
+        return None
+
+    def _check_and_trigger(self, now, cfg, last_triggered):
+        """检查当前时间是否匹配任何调度，匹配则触发（补偿错过的情况）"""
+        current_time = now.strftime("%H:%M")
+        current_date = now.strftime("%Y-%m-%d")
+        current_weekday = now.isoweekday()
+
+        for i, schedule in enumerate(cfg["schedules"]):
+            if not schedule.get("enabled", True):
+                continue
+            if schedule["time"] != current_time:
+                continue
+
+            stype = schedule.get("schedule_type", "daily")
+
+            # ---- 一次性模式 ----
+            if stype == "once":
+                sched_date = schedule.get("date", "")
+                if sched_date != current_date:
+                    continue
+                if schedule.get("last_run") == current_date:
+                    continue
+                schedule["last_run"] = current_date
+                save_scheduler_config(cfg)
+
+            # ---- 每周模式 ----
+            elif stype == "weekly":
+                wds = schedule.get("weekdays", [])
+                if current_weekday not in wds:
+                    continue
+                if last_triggered.get(schedule.get("id", str(i))) == current_date:
+                    continue
+
+            # ---- 指定日期模式 ----
+            elif stype == "dates":
+                sched_dates = schedule.get("dates", [])
+                if current_date not in sched_dates:
+                    continue
+                if last_triggered.get(schedule.get("id", str(i))) == current_date:
+                    continue
+
+            # ---- 每天模式 ----
+            else:  # daily
+                if last_triggered.get(schedule.get("id", str(i))) == current_date:
+                    continue
+
+            last_triggered[schedule.get("id", str(i))] = current_date
+
+            accts = schedule.get("accounts", [])
+            sched_groups = schedule.get("scheduler_groups", "")
+            hutao_checkin = schedule.get("hutao_checkin", False)
+            hutao_accounts = schedule.get("hutao_accounts", [])
+
+            def trigger(accts=accts, grp=sched_groups):
+                self._log(f"[定时器] 到点 {current_time}，自动执行: {', '.join(accts)}")
+
+                if self.running:
+                    self._log("[定时器] 当前正在执行中，跳过")
+                    return
+
+                for name, var in self.account_vars.items():
+                    var.set(name in accts)
+
+                if grp:
+                    for acc in self.cfg.get("accounts", []):
+                        if acc["name"] in accts:
+                            acc["scheduler_groups"] = grp
+                    save_config(self.cfg)
+
+                # 获取互斥锁，若有签到任务正在执行则等待
+                self.task_exec_lock.acquire()
+                self._start()
+
+                # 胡桃签到（若勾选）—— 在任务启动后并行执行
+                if hutao_checkin and hutao_accounts:
+                    self._log(f"[定时器] 附加胡桃签到: {', '.join(hutao_accounts)}")
+                    threading.Thread(
+                        target=_run_hutao_checkin,
+                        args=(self._log, None, hutao_accounts),
+                        daemon=True
+                    ).start()
+
+            self.root.after(0, trigger)
+
+    def _compensate_missed(self, last_check, now, cfg, last_triggered):
+        """扫描所有调度，补偿因系统休眠而错过的触发。
+
+        对每个启用的 daily / weekly / once / dates 调度：
+        计算其今天的触发时间，若落入 [last_check, now] 区间且尚未
+        触发过，则立即补偿执行。
+        """
+        current_date = now.strftime("%Y-%m-%d")
+        current_weekday = now.isoweekday()
+
+        for i, schedule in enumerate(cfg["schedules"]):
+            if not schedule.get("enabled", True):
+                continue
+
+            sched_id = schedule.get("id", str(i))
+            stype = schedule.get("schedule_type", "daily")
+
+            try:
+                h, m = map(int, schedule["time"].split(":"))
+            except (ValueError, AttributeError):
+                continue
+
+            trigger_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
+
+            # 检查触发时间是否落入休眠窗口
+            if not (last_check <= trigger_today <= now):
+                continue
+
+            # ---- 去重检查 ----
+            if stype == "daily":
+                if last_triggered.get(sched_id) == current_date:
+                    continue
+
+            elif stype == "weekly":
+                if current_weekday not in schedule.get("weekdays", []):
+                    continue
+                if last_triggered.get(sched_id) == current_date:
+                    continue
+
+            elif stype == "once":
+                if schedule.get("date", "") != current_date:
+                    continue
+                if last_triggered.get(sched_id) == current_date:
+                    continue
+
+            elif stype == "dates":
+                if current_date not in schedule.get("dates", []):
+                    continue
+                if last_triggered.get(sched_id) == current_date:
+                    continue
+            else:
+                continue
+
+            last_triggered[sched_id] = current_date
+
+            accts = schedule.get("accounts", [])
+            sched_groups = schedule.get("scheduler_groups", "")
+            trigger_time = schedule["time"]
+            hutao_checkin = schedule.get("hutao_checkin", False)
+            hutao_accounts = schedule.get("hutao_accounts", [])
+
+            def compensate_trigger(accts=accts, grp=sched_groups, t=trigger_time):
+                self._log(f"[定时器] 休眠补偿触发 {t}，自动执行: {', '.join(accts)}")
+
+                if self.running:
+                    self._log("[定时器] 当前正在执行中，跳过")
+                    return
+
+                for name, var in self.account_vars.items():
+                    var.set(name in accts)
+
+                if grp:
+                    for acc in self.cfg.get("accounts", []):
+                        if acc["name"] in accts:
+                            acc["scheduler_groups"] = grp
+                    save_config(self.cfg)
+
+                self._start()
+
+                if hutao_checkin and hutao_accounts:
+                    self._log(f"[定时器] 休眠补偿附加胡桃签到: {', '.join(hutao_accounts)}")
+                    threading.Thread(
+                        target=_run_hutao_checkin,
+                        args=(self._log, None, hutao_accounts),
+                        daemon=True
+                    ).start()
+
+            self.root.after(0, compensate_trigger)
 
     def _start(self):
         sel = self._get_selected()
@@ -4752,13 +8320,14 @@ class GenshinMultiAccountToolGUI:
 
         self._clear_log()
         self._log("=" * 55)
-        self._log(f"GenshinMultiAccountTool v5.4  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        self._log(f"GenshinMultiAccountTool v5.5  {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         self._log(f"选中: {', '.join(sel)}")
         self._log("=" * 55)
 
         selected_accounts = [a for a in self.cfg.get("accounts", [])
                              if a["name"] in sel]
-        self.worker = WorkerThread(selected_accounts, self.log_queue, self.stop_event, self.pause_event)
+        self.worker = WorkerThread(selected_accounts, self.log_queue, self.stop_event, self.pause_event,
+                                    exec_lock=self.task_exec_lock)
         self.worker.start()
 
         # 自动最小化窗口，避免挡住游戏画面
@@ -4766,20 +8335,33 @@ class GenshinMultiAccountToolGUI:
             self.root.iconify()
 
     def _stop(self):
-        if not self.running:
+        if not self.running and not self.checkin_stop_event:
             return
         self._log("正在停止...")
         self.stop_event.set()
         self.pause_event.set()  # 取消暂停以便线程能退出
+        # 同时中断签到线程
+        if self.checkin_stop_event:
+            self.checkin_stop_event.set()
         self.paused = False
         self.status.config(text="正在停止...")
         self.stop_btn.config(state="disabled")
         self.pause_btn.config(state="disabled")
         self.root.deiconify()  # 恢复窗口
+        self.root.lift()
+        self.root.focus_force()
+
+        # 需求3：停止时异步停止 BetterGI 进程（避免阻塞 UI）
+        if find_proc("BetterGI.exe"):
+            self._log("停止 BetterGI 进程...")
+            threading.Thread(
+                target=lambda: kill_proc("BetterGI.exe", graceful=False),
+                daemon=True
+            ).start()
 
     def _pause_toggle(self):
         """暂停/继续切换"""
-        if not self.running:
+        if not self.running and not self.checkin_stop_event:
             return
         if self.paused:
             self._resume()
@@ -4794,6 +8376,9 @@ class GenshinMultiAccountToolGUI:
         self.pause_btn.config(text="▶ 继续", bg="#52C41A",
                               activebackground="#389E0D")
 
+        # 需求2：暂停时同步暂停 BetterGI（发送 F11 热键）
+        self._toggle_bettergi_pause()
+
     def _resume(self):
         self.paused = False
         self.pause_event.set()  # 恢复工作线程
@@ -4802,13 +8387,48 @@ class GenshinMultiAccountToolGUI:
         self.pause_btn.config(text="⏸ 暂停", bg="#F0AD4E",
                               activebackground="#EC971F")
 
+        # 需求2：恢复时同步恢复 BetterGI（发送相同热键）
+        self._toggle_bettergi_pause()
+
+    def _toggle_bettergi_pause(self):
+        """向 BetterGI 窗口发送暂停/恢复热键（F11）。
+        通过激活 BetterGI 窗口后发送按键，然后尝试恢复焦点到原神。"""
+        if not HAS_GW or not HAS_PA:
+            return
+        try:
+            windows = gw.getWindowsWithTitle("BetterGI")
+            if not windows:
+                return
+            bg_window = windows[0]
+            # 尝试恢复 BetterGI 窗口（可能已最小化）
+            try:
+                bg_window.restore()
+            except Exception:
+                pass
+            bg_window.activate()
+            time.sleep(0.15)
+            pyautogui.press("f11")
+            self._log("已同步 BetterGI 暂停/恢复状态")
+            time.sleep(0.1)
+            # 尝试恢复焦点到原神
+            genshin_wins = (gw.getWindowsWithTitle("原神") or
+                            gw.getWindowsWithTitle("Genshin Impact"))
+            if genshin_wins:
+                try:
+                    genshin_wins[0].activate()
+                except Exception:
+                    pass
+        except Exception as e:
+            self._log(f"[!] BetterGI 暂停同步失败: {e}")
+
     # ------------------------------------------------------------------
     # 日志 & 轮询
     # ------------------------------------------------------------------
 
     def _poll_log(self):
         try:
-            while True:
+            log_lines = []
+            for _ in range(50):
                 msg = self.log_queue.get_nowait()
                 if msg == "__DONE__":
                     self._on_done()
@@ -4820,14 +8440,28 @@ class GenshinMultiAccountToolGUI:
                 elif msg.startswith("__STATUS__"):
                     self.status.config(text=msg.split("__", 2)[2])
                 else:
-                    self._log(msg)
+                    ts = datetime.now().strftime("%H:%M:%S")
+                    log_lines.append(f"[{ts}] {msg}\n")
+            if log_lines:
+                self._log_batch("".join(log_lines))
+            self._log_poll_interval = 100  # 有消息时恢复快速轮询
         except queue.Empty:
-            pass
-        self.root.after(100, self._poll_log)
+            self._log_poll_interval = 500  # 空闲时降频
+        self.root.after(self._log_poll_interval, self._poll_log)
 
     def _log(self, msg):
+        """单行日志（外部直接调用时使用，如 _clear_log 等非队列场景）"""
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._log_batch(f"[{ts}] {msg}\n")
+
+    def _log_batch(self, text):
+        """批量写入日志文本，仅触发一次滚动条更新"""
         self.log_area.config(state="normal")
-        self.log_area.insert("end", msg + "\n")
+        self.log_area.insert("end", text)
+        # 超过 2000 行则截断前一半，防 UI 膨胀
+        total_lines = int(self.log_area.index("end-1c").split(".")[0])
+        if total_lines > 2000:
+            self.log_area.delete("1.0", f"{total_lines // 2}.0")
         self.log_area.see("end")
         self.log_area.config(state="disabled")
         self._update_log_scrollbar()
@@ -4895,6 +8529,8 @@ class GenshinMultiAccountToolGUI:
         self.root.after(200, self._rebuild_tray_menu)
         self.paused = False
         self.root.deiconify()  # 恢复窗口
+        self.root.lift()
+        self.root.focus_force()
         self.start_btn.config(state="normal", bg=COLORS["primary"])
         self.pause_btn.config(state="disabled", bg="#E0E4E8",
                               fg=COLORS["text_light"])
@@ -4902,6 +8538,23 @@ class GenshinMultiAccountToolGUI:
                              fg=COLORS["text"])
         self.status.config(text="就绪 | 任务已完成或被中断")
         self._log(f"结束: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+        # 任务完成后启动软件
+        settings = self.cfg.get("settings", {})
+        launch_apps_enabled = settings.get("launch_apps_enabled", False)
+        launch_apps = settings.get("launch_apps_after_all", [])
+        if launch_apps_enabled and launch_apps and not self.stop_event.is_set():
+            self._log("启动任务完成后软件...")
+            for app_path in launch_apps:
+                app_path = app_path.strip()
+                if app_path and os.path.isfile(app_path):
+                    try:
+                        subprocess.Popen([app_path], shell=True)
+                        self._log(f"  已启动: {os.path.basename(app_path)}")
+                    except Exception as e:
+                        self._log(f"  [!] 启动失败: {os.path.basename(app_path)} - {e}")
+                else:
+                    self._log(f"  [!] 文件不存在: {app_path}")
 
         # 自动关机检查
         auto_shutdown = self.cfg.get("settings", {}).get("auto_shutdown", False)
@@ -4932,40 +8585,133 @@ class GenshinMultiAccountToolGUI:
         self.status.config(text="就绪 | 任务已完成")
 
     def _register_hotkey(self):
-        """注册全局停止热键和暂停热键"""
-        try:
-            import keyboard
-            hotkey_stop = self.cfg.get("hotkeys", {}).get("stop", "ctrl+shift+q")
-            hotkey_pause = self.cfg.get("hotkeys", {}).get("pause", "ctrl+shift+p")
-            keyboard.add_hotkey(hotkey_stop, self._hotkey_stop)
-            keyboard.add_hotkey(hotkey_pause, self._hotkey_pause)
-            self._hotkey_stop_registered = hotkey_stop
-            self._hotkey_pause_registered = hotkey_pause
-        except ImportError:
-            pass
+        """使用 Win32 RegisterHotKey(NULL) 在后台线程注册全局热键（窗口最小化/后台/托盘均有效）。
+
+        先通知泵线程注销所有旧热键，再根据配置重新注册 stop / pause / start。
+        空字符串的快捷键自动跳过（不绑定）。
+        """
+        hotkeys = self.cfg.get("hotkeys", {})
+        
+        # 收集要注册的热键
+        pending = []
+        for name, key_str, callback in [
+            ("stop", hotkeys.get("stop", ""), self._hotkey_stop),
+            ("pause", hotkeys.get("pause", ""), self._hotkey_pause),
+            ("start", hotkeys.get("start", ""), self._hotkey_start),
+        ]:
+            if not key_str:
+                continue
+            mods, vk = _parse_hotkey_str(key_str)
+            if vk is None:
+                self._log(f"警告: 快捷键 '{key_str}' 无法解析，已跳过")
+                continue
+            pending.append((name, key_str, mods, vk, callback))
+        
+        # 将待注册列表交给泵线程（或启动新线程）
+        self._pending_hotkeys = pending
+        
+        if not pending:
+            self._unregister_hotkey()
+            return
+        
+        if self._hotkey_thread is None or not self._hotkey_thread.is_alive():
+            self._hotkey_ready.clear()
+            self._hotkey_thread = threading.Thread(target=self._hotkey_pump, daemon=True)
+            self._hotkey_thread.start()
+            if not self._hotkey_ready.wait(timeout=3.0):
+                self._log("警告: 热键后台线程启动超时")
+        else:
+            # 通知已有线程重新加载
+            self._hotkey_reload.set()
 
     def _unregister_hotkey(self):
-        """注销全局热键"""
-        try:
-            import keyboard
-            if hasattr(self, '_hotkey_stop_registered') and self._hotkey_stop_registered:
-                keyboard.remove_hotkey(self._hotkey_stop_registered)
-            if hasattr(self, '_hotkey_pause_registered') and self._hotkey_pause_registered:
-                keyboard.remove_hotkey(self._hotkey_pause_registered)
-        except Exception:
-            pass
+        """通知后台泵线程注销所有热键并退出"""
+        self._hotkey_reload.set()
+        self._pending_hotkeys = []
+        # 旧热键由泵线程在收到 reload 信号时清理
+
+    def _hotkey_pump(self):
+        """后台线程：RegisterHotKey(NULL) + GetMessage 消息泵。
+
+        热键注册到 NULL 句柄 → WM_HOTKEY 投递到本线程队列，
+        本线程通过 PeekMessage 取出并 via after_idle 投递到主线程。
+        """
+        user32 = ctypes.windll.user32
+        msg = wintypes.MSG()
+        local_ids = {}    # atom_id → (name, callback)
+        self._hotkey_reload.clear()
+        self._hotkey_ready.set()
+        
+        while not self._quitting:
+            # 处理重载请求
+            if self._hotkey_reload.is_set():
+                self._hotkey_reload.clear()
+                # 注销所有旧热键
+                for aid in list(local_ids.keys()):
+                    try:
+                        user32.UnregisterHotKey(None, aid)
+                    except Exception:
+                        pass
+                local_ids.clear()
+                
+                # 注册新热键
+                aid = 1
+                for name, key_str, mods, vk, callback in self._pending_hotkeys:
+                    try:
+                        result = user32.RegisterHotKey(None, aid, mods, vk)
+                        if result:
+                            local_ids[aid] = (name, callback)
+                            aid += 1
+                        else:
+                            err = ctypes.get_last_error()
+                            self.root.after_idle(
+                                lambda k=key_str, e=err: self._log(
+                                    f"警告: 注册热键 '{k}' 失败 (错误码 {e})，可能已被其他程序占用"))
+                    except Exception as ex:
+                        self.root.after_idle(
+                            lambda k=key_str, ex=ex: self._log(
+                                f"警告: 注册热键 '{k}' 异常: {ex}"))
+                
+                # 更新主线程可见的热键映射（用于外部查询）
+                self._hotkey_atoms = dict(local_ids)
+                self._hotkey_ids = {name: aid for aid, (name, _) in local_ids.items()}
+                self._hotkey_ready.set()
+                
+                if not local_ids:
+                    break  # 没有热键要监听，退出泵线程
+            
+            # 泵消息（50ms 超时，不阻塞退出检查）
+            if user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):  # PM_REMOVE
+                if msg.message == _WM_HOTKEY:
+                    entry = local_ids.get(msg.wParam)
+                    if entry:
+                        _name, callback = entry
+                        self.root.after_idle(callback)
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            else:
+                self._hotkey_stop_event.wait(0.05)
 
     def _hotkey_stop(self):
         """热键触发的停止"""
-        if self.running:
-            self._log(f"热键停止 ({self._hotkey_stop_registered})")
+        if self.running or self.checkin_stop_event:
+            hotkey_str = self.cfg.get("hotkeys", {}).get("stop", "")
+            self._log(f"热键停止 ({hotkey_str})")
             self._stop()
 
     def _hotkey_pause(self):
         """热键触发的暂停/继续"""
         if self.running:
-            self._log(f"热键暂停/继续 ({self._hotkey_pause_registered})")
+            hotkey_str = self.cfg.get("hotkeys", {}).get("pause", "")
+            self._log(f"热键暂停/继续 ({hotkey_str})")
             self._pause_toggle()
+
+    def _hotkey_start(self):
+        """热键触发的开始任务"""
+        if not self.running:
+            hotkey_str = self.cfg.get("hotkeys", {}).get("start", "")
+            self._log(f"热键开始任务 ({hotkey_str})")
+            self._start()
 
     # ------------------------------------------------------------------
     # 系统托盘（pystray）
@@ -4985,19 +8731,22 @@ class GenshinMultiAccountToolGUI:
             if image is None:
                 image = self._tray_default_image()
 
+            checkin_menu, checkin_has_enabled = self._build_checkin_submenu()
             menu = pystray.Menu(
                 pystray.MenuItem("显示窗口", self._tray_show_window, default=True),
                 pystray.MenuItem("开始任务", self._tray_start),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("定时器", self._build_scheduler_submenu(),
+                pystray.MenuItem("定时任务", self._build_scheduler_submenu(),
                     checked=lambda item: any(s.get("enabled", True)
                         for s in load_scheduler_config().get("schedules", []))),
+                pystray.MenuItem("定时签到", checkin_menu,
+                    checked=lambda item, he=checkin_has_enabled: he),
                 pystray.MenuItem("取消自动关机", self._tray_cancel_shutdown, checked=lambda item: self._shutdown_pending),
                 pystray.Menu.SEPARATOR,
                 pystray.MenuItem("设置", self._tray_settings),
                 pystray.MenuItem("退出", self._tray_quit),
             )
-            self.tray = pystray.Icon("genshin_onedragon", image, "GenshinMultiAccountTool v5.4", menu)
+            self.tray = pystray.Icon("genshin_onedragon", image, "GenshinMultiAccountTool v5.5", menu)
             global _global_tray
             _global_tray = self.tray
             threading.Thread(target=self.tray.run, daemon=True).start()
@@ -5049,7 +8798,11 @@ class GenshinMultiAccountToolGUI:
         """退出程序：先注销托盘图标，再销毁窗口，避免幽灵图标。"""
         global _global_tray
         self._quitting = True
+        self._unregister_hotkey()
         self.scheduler_event.set()
+        self.checkin_scheduler_event.set()
+        if self.checkin_stop_event:
+            self.checkin_stop_event.set()
         self.running = False
         if self.stop_event:
             self.stop_event.set()
@@ -5103,6 +8856,9 @@ class GenshinMultiAccountToolGUI:
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
+        elif action == "settings":
+            self._pending_action = None
+            self._open_settings()
         if getattr(self, '_pending_rebuild', False):
             self._pending_rebuild = False
             self._rebuild_tray_menu()
@@ -5127,10 +8883,12 @@ class GenshinMultiAccountToolGUI:
         self._pending_action = "show_window"
 
     def _refresh_scheduler_ui(self):
-        """刷新定时计划对话框 UI（供托盘回调调用）"""
+        """刷新定时计划对话框和签到对话框 UI（供托盘回调调用）"""
         if hasattr(self, 'scheduler_dialog') and self.scheduler_dialog and self.scheduler_dialog.winfo_exists():
             self.scheduler_dialog._load_list()
             self.scheduler_dialog.refresh_btn()
+        if hasattr(self, 'checkin_dialog') and self.checkin_dialog and self.checkin_dialog.dlg.winfo_exists():
+            self.checkin_dialog._load_list()
 
     def _tray_scheduler_toggle(self):
         def _toggle():
@@ -5157,8 +8915,8 @@ class GenshinMultiAccountToolGUI:
     def _tray_cancel_shutdown(self):
         self.root.after(0, self._cancel_shutdown)
 
-    def _tray_settings(self):
-        self.root.after(0, self._open_settings)
+    def _tray_settings(self, icon=None, item=None):
+        self._pending_action = "settings"
 
     # ------------------------------------------------------------------
     # 托盘 - 定时器子菜单
@@ -5250,12 +9008,36 @@ class GenshinMultiAccountToolGUI:
         self._pending_rebuild = True
         self.root.after(0, self._refresh_scheduler_ui)
 
+    def _tray_start_all_checkin(self, icon, item):
+        cfg = load_checkin_schedule()
+        for c in cfg.get("checkins", []):
+            c["enabled"] = True
+        save_checkin_schedule(cfg)
+        cfg["enabled"] = True
+        save_checkin_schedule(cfg)
+        if not self.checkin_scheduler_event or not self.checkin_scheduler_thread or not self.checkin_scheduler_thread.is_alive():
+            self.start_checkin_scheduler()
+        self.root.after(0, lambda: self._log("定时签到已全部启用"))
+        self._pending_rebuild = True
+        self.root.after(0, self._refresh_scheduler_ui)
+
+    def _tray_stop_all_checkin(self, icon, item):
+        cfg = load_checkin_schedule()
+        for c in cfg.get("checkins", []):
+            c["enabled"] = False
+        save_checkin_schedule(cfg)
+        self.root.after(0, lambda: self._log("定时签到已全部停用"))
+        self._pending_rebuild = True
+        self.root.after(0, self._refresh_scheduler_ui)
+
     def _build_scheduler_submenu(self):
         """动态构建定时器子菜单（每次调用时根据最新状态生成）"""
         cfg = load_scheduler_config()
         schedules = cfg.get("schedules", [])
         items = []
         for s in schedules:
+            if s.get("task_type") == "checkin":
+                continue
             desc = self._format_schedule_desc_short(s)
             enabled = s.get("enabled", True)
             items.append(pystray.MenuItem(
@@ -5266,16 +9048,46 @@ class GenshinMultiAccountToolGUI:
         if items:
             items.append(pystray.Menu.SEPARATOR)
         all_enabled = all(s.get("enabled", True) for s in schedules) if schedules else False
+        has_enabled = any(s.get("enabled", True) for s in schedules) if schedules else False
+        scheduler_running = not self.scheduler_event.is_set()
         items.append(pystray.MenuItem(
             "一键启动全部定时器", self._tray_start_all,
-            checked=lambda item, ae=all_enabled: ae))
-        has_enabled = any(s.get("enabled", True) for s in schedules) if schedules else False
-        if has_enabled:
+            checked=lambda item, ae=all_enabled, sr=scheduler_running: ae and sr))
+        if scheduler_running and has_enabled:
             items.append(pystray.MenuItem(
                 "一键关闭全部定时器", self._tray_stop_all))
         return pystray.Menu(*items) if items else pystray.Menu(
             pystray.MenuItem("（暂无任务）", None, enabled=False)
         )
+
+    def _build_checkin_submenu(self):
+        """动态构建定时签到子菜单（每次调用时根据最新状态生成）"""
+        cfg = load_checkin_schedule()
+        checkins = cfg.get("checkins", [])
+        items = []
+        for c in checkins:
+            c_enabled = c.get("enabled", True)
+            time_str = c.get("time", "??:??")
+            label = c.get("label", f"签到 {time_str}")
+            items.append(pystray.MenuItem(
+                label,
+                self._toggle_checkin_entry(c),
+                checked=lambda item, en=c_enabled: en
+            ))
+        if items:
+            items.append(pystray.Menu.SEPARATOR)
+        has_enabled = any(c.get("enabled", True) for c in checkins) if checkins else False
+        all_enabled = all(c.get("enabled", True) for c in checkins) if checkins else False
+        checkin_running = not self.checkin_scheduler_event.is_set()
+        items.append(pystray.MenuItem(
+            "一键启用全部签到", self._tray_start_all_checkin,
+            checked=lambda item, ae=all_enabled: ae))
+        if checkin_running and has_enabled:
+            items.append(pystray.MenuItem(
+                "一键停用全部签到", self._tray_stop_all_checkin))
+        return pystray.Menu(*items) if items else pystray.Menu(
+            pystray.MenuItem("（暂无签到任务）", None, enabled=False)
+        ), has_enabled
 
     def _rebuild_tray_menu(self):
         """重建托盘菜单（仅在主循环空闲时调用，不在 pystray 回调中调用）"""
@@ -5290,11 +9102,14 @@ class GenshinMultiAccountToolGUI:
             items.append(pystray.MenuItem("停止任务", self._tray_stop))
         else:
             items.append(pystray.MenuItem("开始任务", self._tray_start))
+        checkin_menu, checkin_has_enabled = self._build_checkin_submenu()
         items.extend([
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("定时器", self._build_scheduler_submenu(),
                 checked=lambda item: any(s.get("enabled", True)
-                    for s in load_scheduler_config().get("schedules", []))),
+                    for s in load_scheduler_config().get("schedules", [])) and not self.scheduler_event.is_set()),
+            pystray.MenuItem("定时签到", checkin_menu,
+                checked=lambda item, he=checkin_has_enabled: he),
             pystray.MenuItem("取消自动关机", self._tray_cancel_shutdown,
                              checked=lambda item: self._shutdown_pending),
             pystray.Menu.SEPARATOR,
@@ -5349,6 +9164,17 @@ def _gen_icon():
         return None
 
 
+def _gen_blank_ico():
+    """透明 ICO（16x16 + 32x32），用于子窗口去除 Tkinter 默认图标"""
+    import tempfile
+    blank_path = os.path.join(tempfile.gettempdir(), "_gm_blank.ico")
+    if not os.path.exists(blank_path):
+        from PIL import Image
+        img = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        img.save(blank_path, format="ICO", sizes=[(16, 16), (32, 32)])
+    return blank_path
+
+
 def main():
     # 单实例检查
     import msvcrt
@@ -5377,11 +9203,14 @@ def main():
         root.iconbitmap(ico)
     app = GenshinMultiAccountToolGUI(root)
 
-    # 开机自启动：自动启动定时器
+    # 开机自启动：自动启动定时器，不显示主窗口
     if "--auto-start-scheduler" in sys.argv:
         app.root.after(500, app._auto_start_scheduler)
+    else:
+        root.deiconify()
+        root.lift()
+        root.focus_force()
 
-    root.deiconify()
     root.mainloop()
 
 

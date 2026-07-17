@@ -279,36 +279,83 @@ class GenshinMultiAccountScheduler:
             self.status_var.set("定时器已停止")
 
     def _scheduler_loop(self):
+        """定时器后台线程：30秒轮询 + 去重 + 休眠补偿。
+
+        每次循环比较当前 HH:MM 与调度时间，匹配则触发。
+        使用 last_triggered 字典去重，确保同一分钟只触发一次。
+        若检测到时间跳跃 > 90 秒（系统休眠恢复），补偿执行错过的触发。
+        """
+        last_triggered = {}  # key=schedule index, value=最后触发日期字符串
+        last_check = datetime.now()
+
         while self.running:
+            cfg = load_config()  # 每次循环重载，支持外部修改
             now = datetime.now()
             current_time = now.strftime("%H:%M")
             current_date = now.strftime("%Y-%m-%d")
 
-            for schedule in self.cfg["schedules"]:
-                if schedule["time"] == current_time:
-                    # 检查重复
+            # ---- 检测时间跳跃（系统休眠恢复），补偿错过触发 ----
+            gap = (now - last_check).total_seconds()
+            if gap > 90:
+                for i, schedule in enumerate(cfg["schedules"]):
+                    try:
+                        h, m = map(int, schedule["time"].split(":"))
+                    except (ValueError, AttributeError):
+                        continue
+                    trigger_today = now.replace(hour=h, minute=m, second=0, microsecond=0)
+                    # 触发时间落入休眠窗口
+                    if not (last_check <= trigger_today <= now):
+                        continue
+                    # 去重
+                    sid = schedule.get("id", str(i))
                     if schedule.get("repeat", True):
-                        pass  # 每天执行
+                        if last_triggered.get(sid) == current_date:
+                            continue
                     else:
-                        # 仅一次，检查是否已执行过
-                        last_run = schedule.get("last_run")
-                        if last_run == current_date:
-                            continue  # 今天已执行过
+                        if schedule.get("last_run") == current_date:
+                            continue
+                    last_triggered[sid] = current_date
+                    if not schedule.get("repeat", True):
                         schedule["last_run"] = current_date
-                        save_config(self.cfg)
+                    self._launch_exe(schedule)
 
-                    # 启动程序
-                    exe_path = schedule["exe"]
-                    if os.path.isfile(exe_path):
-                        try:
-                            subprocess.Popen([exe_path], shell=True)
-                            self.root.after(0, lambda: self.status_var.set(f"已启动: {os.path.basename(exe_path)}"))
-                        except Exception as e:
-                            self.root.after(0, lambda: self.status_var.set(f"启动失败: {e}"))
-                    else:
-                        self.root.after(0, lambda: self.status_var.set(f"文件不存在: {exe_path}"))
+            for i, schedule in enumerate(cfg["schedules"]):
+                if schedule["time"] != current_time:
+                    continue
 
-            time.sleep(60)  # 每分钟检查一次
+                sid = schedule.get("id", str(i))
+
+                # ---- 去重：同一分钟只触发一次 ----
+                if schedule.get("repeat", True):
+                    if last_triggered.get(sid) == current_date:
+                        continue
+                else:
+                    # 仅一次，检查是否已执行过
+                    if schedule.get("last_run") == current_date:
+                        continue
+                    schedule["last_run"] = current_date
+
+                last_triggered[sid] = current_date
+
+                self._launch_exe(schedule)
+
+            last_check = now
+            time.sleep(30)  # 每30秒检查一次
+
+    def _launch_exe(self, schedule):
+        """启动指定调度的可执行文件"""
+        exe_path = schedule["exe"]
+        if os.path.isfile(exe_path):
+            try:
+                subprocess.Popen([exe_path], shell=True)
+                self.root.after(0, lambda: self.status_var.set(f"已启动: {os.path.basename(exe_path)}"))
+            except Exception as e:
+                self.root.after(0, lambda: self.status_var.set(f"启动失败: {e}"))
+        else:
+            self.root.after(0, lambda: self.status_var.set(f"文件不存在: {exe_path}"))
+
+        # 每次触发后保存 config（持久化 last_run 等）
+        save_config(self.cfg)
 
 # ============================================================
 # 入口

@@ -1,0 +1,13 @@
+{
+  "manifest_version": 1,
+  "name": "识别游戏UID",
+  "version": "1.0",
+  "bgi_version": "0.36.1",
+  "description": "OCR识别原神右下角UID并在日志中输出",
+  "authors": [
+    {
+      "name": "Marvis"
+    }
+  ],
+  "main": "main.js"
+}

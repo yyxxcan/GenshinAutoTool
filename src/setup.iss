@@ -1,8 +1,9 @@
 ; GenshinMultiAccountTool - Inno Setup 安装脚本
 ; 使用前请先执行 build_onedir.py 生成 dist_onedir 目录
+; 安装包结构: exe + tesseract-ocr + 配置文件（其他全部嵌入 exe）
 
 #define MyAppName "GenshinMultiAccountTool"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "GenshinAutoTool"
 #define MyAppURL ""
 #define MyAppExeName "GenshinMultiAccountTool.exe"
@@ -47,17 +48,15 @@ Name: "chinesesimp"; MessagesFile: "compiler:Languages\ChineseSimplified.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: checkedonce
 
 [Files]
-; 主程序及依赖（排除配置文件，避免升级覆盖用户数据）
-Source: "dist_onedir\{#MyAppName}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "config.json"
+; ==== 主程序（单文件 exe，所有 Python 代码和依赖已嵌入）====
+Source: "dist_onedir\{#MyAppName}\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 
-; 配置文件仅首次安装时复制（升级不覆盖）
+; ==== tesseract-ocr 引擎（体积过大，保留为独立目录）====
+Source: "dist_onedir\{#MyAppName}\tesseract-ocr\*"; DestDir: "{app}\tesseract-ocr"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+; ==== 配置文件：仅首次安装时复制（升级不覆盖已有用户数据）====
 Source: "dist_onedir\{#MyAppName}\config.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
-
-; 调度配置文件仅首次安装时复制（升级不覆盖）
 Source: "dist_onedir\{#MyAppName}\scheduler_config.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist
-
-; 可选：附加说明文件
-; Source: "使用说明.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 ; 开始菜单快捷方式
@@ -73,7 +72,6 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChang
 
 [Registry]
 ; 写入注册表以便 Windows 设置 → 应用 中显示并正常卸载
-; 32位程序在64位系统上
 Root: HKLM; Subkey: "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppName}"; \
     ValueType: string; ValueName: "DisplayName"; ValueData: "{#MyAppName}"; Flags: uninsdeletekey
 Root: HKLM; Subkey: "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppName}"; \
@@ -92,12 +90,11 @@ Root: HKLM; Subkey: "SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Unins
     ValueType: dword; ValueName: "EstimatedSize"; ValueData: "$00007A12"; Flags: uninsdeletekey
 
 [UninstallDelete]
-; 清理程序生成的数据文件（logs、scheduler_config、config 等运行时生成的文件）
+; 清理程序生成的数据文件（logs 等运行时生成的文件）
 Type: filesandordirs; Name: "{app}\logs"
 Type: files; Name: "{app}\*.log"
 
 [Code]
-// 自定义安装路径校验
 function InitializeSetup: Boolean;
 begin
   Result := True;

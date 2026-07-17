@@ -1,13 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""GenshinMultiAccountTool onedir 模式打包脚本（供 Inno Setup 封装用）"""
+"""GenshinMultiAccountTool 打包脚本（--onefile + Inno Setup staging）
 
-import shutil, os, sys, subprocess
+- PyInstaller --onefile：所有 Python 代码、依赖、小资源嵌入单个 exe
+- tesseract-ocr 因体积过大（114MB）保留为独立目录
+- 只暴露 exe + tesseract-ocr + 配置文件 给用户
+"""
+
+import shutil, os, sys, subprocess, json
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DIST_ONEDIR = SCRIPT_DIR / "dist_onedir"
-BUILD_ONEDIR = SCRIPT_DIR / "build_onedir"
+DIST_DIR = SCRIPT_DIR / "dist"          # PyInstaller onefile 输出
+BUILD_DIR = SCRIPT_DIR / "build"        # PyInstaller 构建缓存
+STAGING_DIR = SCRIPT_DIR / "dist_onedir" / "GenshinMultiAccountTool"  # Inno Setup staging
 EXE_NAME = "GenshinMultiAccountTool"
 
 def run(cmd_args):
@@ -17,8 +23,8 @@ def run(cmd_args):
 def main():
     os.chdir(str(SCRIPT_DIR))
 
-    # 清理旧 onedir 构建产物
-    for d in [DIST_ONEDIR, BUILD_ONEDIR]:
+    # 清理旧构建产物
+    for d in [DIST_DIR, BUILD_DIR, STAGING_DIR.parent]:
         if d.exists():
             try:
                 shutil.rmtree(d)
@@ -26,86 +32,98 @@ def main():
             except PermissionError as e:
                 print(f"[警告] 无法清理 {d}: {e}，跳过")
 
-    # ==== 第一步：PyInstaller onedir 打包 ====
-    print("\n========== 第一步：PyInstaller onedir ==========")
+    # ==== 第一步：PyInstaller --onefile 打包 ====
+    print("\n========== 第一步：PyInstaller --onefile ==========")
     run([sys.executable, "-m", "PyInstaller",
-         "--onedir",                          # 目录模式，非单文件
+         "--onefile",
          "--noconsole",
          "--name", EXE_NAME,
          "--icon", "icon.ico",
+         "--add-data", f"BetterGI-UID识别脚本;BetterGI-UID识别脚本",
+         "--add-data", f"BetterGI-主界面检测脚本;BetterGI-主界面检测脚本",
+         "--add-data", "logo.png;.",
          "--add-data", "icon.ico;.",
-         "--distpath", str(DIST_ONEDIR),      # 输出到 dist_onedir
-         "--workpath", str(BUILD_ONEDIR),     # 构建缓存到 build_onedir
+         "--distpath", str(DIST_DIR),
+         "--workpath", str(BUILD_DIR),
          "--collect-all", "pystray",
          "--hidden-import", "numpy",
+         "--hidden-import", "psutil",
+         "--hidden-import", "pyautogui",
+         "--hidden-import", "pygetwindow",
+         "--hidden-import", "pytesseract",
+         "--hidden-import", "uiautomation",
          "--hidden-import", "PIL._imaging",
          "--hidden-import", "PIL._tkinter_finder",
          "--hidden-import", "PIL.Image",
          "--hidden-import", "PIL.ImageDraw",
+         "--hidden-import", "websocket",
+         "--hidden-import", "requests",
          "main.py"])
 
-    exe_dir = DIST_ONEDIR / EXE_NAME
-    if not exe_dir.is_dir():
-        print(f"[错误] 未找到输出目录: {exe_dir}")
+    exe_path = DIST_DIR / f"{EXE_NAME}.exe"
+    if not exe_path.is_file():
+        print(f"[错误] 未找到输出文件: {exe_path}")
         sys.exit(1)
 
-    # ==== 第二步：收集附加文件到发布目录 ====
-    print("\n========== 第二步：收集附加文件 ==========")
+    print(f"\n[信息] --onefile 构建完成: {exe_path}")
+    exe_size_mb = exe_path.stat().st_size / (1024 * 1024)
+    print(f"[信息] exe 大小: {exe_size_mb:.1f} MB")
 
-    # 复制配置文件模板
-    for f in ["config.json", "config_template.json", "scheduler_config.json",
-              "requirements.txt"]:
-        src = SCRIPT_DIR / f
-        if src.exists():
-            shutil.copy2(src, exe_dir / f)
-            print(f"[信息] 复制: {f}")
+    # ==== 第二步：创建 Inno Setup staging 目录 ====
+    print("\n========== 第二步：创建安装包 staging 目录 ==========")
+    STAGING_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 复制使用说明
-    for doc in ["使用说明.md", "使用说明.txt"]:
-        src = SCRIPT_DIR / doc
-        if src.exists():
-            shutil.copy2(src, exe_dir / doc)
-            print(f"[信息] 复制: {doc}")
+    # 2a. 复制 onefile exe
+    shutil.copy2(exe_path, STAGING_DIR / f"{EXE_NAME}.exe")
+    print(f"[信息] 复制 exe → staging")
 
-    # 复制 scheduler.py
-    src = SCRIPT_DIR / "scheduler.py"
-    if src.exists():
-        shutil.copy2(src, exe_dir / "scheduler.py")
-        print(f"[信息] 复制: scheduler.py")
-
-    # 复制 Logo
-    src = SCRIPT_DIR / "logo.png"
-    if src.exists():
-        shutil.copy2(src, exe_dir / "logo.png")
-        print(f"[信息] 复制: logo.png")
-
-    # 复制 Tesseract OCR
-    tess = SCRIPT_DIR / "tesseract-ocr"
-    if tess.is_dir():
-        dest = exe_dir / "tesseract-ocr"
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(tess, dest)
+    # 2b. 复制 tesseract-ocr（不嵌入 exe，太大 114MB）
+    tess_src = SCRIPT_DIR / "tesseract-ocr"
+    if tess_src.is_dir():
+        tess_dest = STAGING_DIR / "tesseract-ocr"
+        if tess_dest.exists():
+            shutil.rmtree(tess_dest)
+        shutil.copytree(tess_src, tess_dest)
         print(f"[信息] 复制: tesseract-ocr")
     else:
-        print(f"[警告] 未找到 tesseract-ocr，如需要 OCR 功能请手动放置")
+        print(f"[警告] 未找到 tesseract-ocr")
 
-    # 复制 BetterGI-UID识别脚本
-    uid_script = SCRIPT_DIR / "BetterGI-UID识别脚本"
-    if uid_script.is_dir():
-        dest = exe_dir / "BetterGI-UID识别脚本"
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(uid_script, dest)
-        print(f"[信息] 复制: BetterGI-UID识别脚本")
-    elif uid_script.is_file():
-        shutil.copy2(uid_script, exe_dir / "BetterGI-UID识别脚本")
-        print(f"[信息] 复制: BetterGI-UID识别脚本")
+    # 2c. 创建空配置文件（首次安装用，不含任何用户数据）
+    empty_config = {
+        "accounts": [],
+        "bettergi": {"exe": "", "config": ""},
+        "snap_hutao": {"exe": "", "app_id": "E8B6E2B3-D2A0-4435-A81D-2A16AAF405C8_k3erpsn8bwzzy!App"},
+        "genshin": {"exe": "", "process_name": "YuanShen.exe"},
+        "monitor": {"max_wait_seconds": 7200},
+        "tesseract": {"path": ""},
+        "hotkeys": {"stop": "ctrl+shift+q", "pause": "ctrl+shift+p", "start": ""},
+        "uid": {"method": "tesseract", "bettergi_group": ""},
+        "settings": {
+            "auto_minimize": True,
+            "minimize_on_close": True,
+            "auto_shutdown": False,
+            "launch_apps_enabled": False,
+            "launch_apps_after_all": [],
+            "stop_closes_all_processes": True,
+        },
+    }
+    config_path = STAGING_DIR / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        json.dump(empty_config, f, ensure_ascii=False, indent=2)
+    print(f"[信息] 创建空配置: config.json")
+
+    # 2d. 复制调度配置（首次安装用空模板）
+    scheduler_config = {"schedules": []}
+    sched_path = STAGING_DIR / "scheduler_config.json"
+    with open(sched_path, "w", encoding="utf-8") as f:
+        json.dump(scheduler_config, f, ensure_ascii=False, indent=2)
+    print(f"[信息] 创建空调度配置: scheduler_config.json")
 
     print("\n" + "=" * 50)
-    print(f"onedir 打包完成!")
-    print(f"  {exe_dir}")
-    print(f"  → 下一步: 用 Inno Setup 编译 setup.iss")
+    print(f"打包完成!")
+    print(f"  onefile exe : {exe_path}")
+    print(f"  staging 目录: {STAGING_DIR}")
+    print(f"  → 下一步: ISCC.exe setup.iss")
     print("=" * 50)
 
 if __name__ == "__main__":

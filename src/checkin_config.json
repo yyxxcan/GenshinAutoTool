@@ -1,0 +1,37 @@
+{
+  "checkins": [
+    {
+      "id": "checkin_0a773606",
+      "time": "08:00",
+      "schedule_type": "daily",
+      "enabled": false,
+      "label": "每日签到 08:00",
+      "date": "",
+      "weekdays": [],
+      "dates": [],
+      "checkin_type": "teyvatguide",
+      "hutao_accounts": [
+        "夜雨I星辰",
+        "昭昭草木荣",
+        "缺月又疏桐"
+      ]
+    },
+    {
+      "id": "checkin_f1aa6e41",
+      "time": "10:00",
+      "schedule_type": "daily",
+      "enabled": false,
+      "label": "每日签到 10:00",
+      "date": "",
+      "weekdays": [],
+      "dates": [],
+      "checkin_type": "teyvatguide",
+      "hutao_accounts": [
+        "夜雨I星辰",
+        "昭昭草木荣",
+        "缺月又疏桐"
+      ]
+    }
+  ],
+  "enabled": false
+}

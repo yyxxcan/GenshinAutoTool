@@ -1,0 +1,13 @@
+{
+  "manifest_version": 1,
+  "name": "检测主界面",
+  "version": "1.0",
+  "bgi_version": "0.36.1",
+  "description": "BetterGI 内部已确认进入游戏主界面后，输出日志标记供外部程序读取",
+  "authors": [
+    {
+      "name": "Marvis"
+    }
+  ],
+  "main": "main.js"
+}

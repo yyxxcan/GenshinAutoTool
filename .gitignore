@@ -1,9 +1,12 @@
 # Build outputs
 dist/
 build/
+dist_onedir/
 *.zip
 GenshinMultiAccountTool.exe
+*.spec
 *.spec.bak
+*.bak
 
 # Bytecode
 __pycache__/
@@ -28,6 +31,10 @@ config_with_accounts.json
 # Test/debug images
 uid_*.png
 null.jpg
+debug_screenshots/
+template_execute_all.png
+template_expand_arrow.png
+template_script.png
 
 # Large binaries (100MB+ tesseract)
 tesseract-ocr/

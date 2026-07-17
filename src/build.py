@@ -36,10 +36,17 @@ def main():
          "--add-data", "icon.ico;.",
          "--collect-all", "pystray",
          "--hidden-import", "numpy",
+         "--hidden-import", "psutil",
+         "--hidden-import", "pyautogui",
+         "--hidden-import", "pygetwindow",
+         "--hidden-import", "pytesseract",
+         "--hidden-import", "uiautomation",
          "--hidden-import", "PIL._imaging",
          "--hidden-import", "PIL._tkinter_finder",
          "--hidden-import", "PIL.Image",
          "--hidden-import", "PIL.ImageDraw",
+         "--hidden-import", "websocket",
+         "--hidden-import", "requests",
          "main.py"])
 
     exe_src = DIST_DIR / f"{EXE_NAME}.exe"
@@ -59,13 +66,37 @@ def main():
             shutil.copy2(src, PACKAGE_DIR / doc)
             print(f"[信息] 复制文档: {doc}")
 
-    # 复制配置文件
-    config = SCRIPT_DIR / "config.json"
-    if config.exists():
-        shutil.copy2(config, PACKAGE_DIR / "config.json")
-        print(f"[信息] 复制配置: config.json")
-    else:
-        print(f"[警告] 未找到 config.json，请手动放置")
+    # 创建空配置文件（不含用户数据）
+    import json as _json
+    empty_config = {
+        "accounts": [],
+        "bettergi": {"exe": "", "config": ""},
+        "snap_hutao": {"exe": "", "app_id": "E8B6E2B3-D2A0-4435-A81D-2A16AAF405C8_k3erpsn8bwzzy!App"},
+        "genshin": {"exe": "", "process_name": "YuanShen.exe"},
+        "monitor": {"max_wait_seconds": 7200},
+        "tesseract": {"path": ""},
+        "hotkeys": {"stop": "ctrl+shift+q", "pause": "ctrl+shift+p", "start": ""},
+        "uid": {"method": "tesseract", "bettergi_group": ""},
+        "settings": {
+            "auto_minimize": True,
+            "minimize_on_close": True,
+            "auto_shutdown": False,
+            "launch_apps_enabled": False,
+            "launch_apps_after_all": [],
+            "stop_closes_all_processes": True,
+        },
+    }
+    config_path = PACKAGE_DIR / "config.json"
+    with open(config_path, "w", encoding="utf-8") as f:
+        _json.dump(empty_config, f, ensure_ascii=False, indent=2)
+    print(f"[信息] 创建空配置: config.json")
+
+    # 创建空调度配置文件
+    scheduler_config = {"schedules": []}
+    sched_path = PACKAGE_DIR / "scheduler_config.json"
+    with open(sched_path, "w", encoding="utf-8") as f:
+        _json.dump(scheduler_config, f, ensure_ascii=False, indent=2)
+    print(f"[信息] 创建空调度配置: scheduler_config.json")
 
     # 复制 Tesseract OCR 便携版
     tess = SCRIPT_DIR / "tesseract-ocr"
@@ -89,6 +120,15 @@ def main():
     elif uid_script.is_file():
         shutil.copy2(uid_script, PACKAGE_DIR / "BetterGI-UID识别脚本")
         print(f"[信息] 复制: BetterGI-UID识别脚本")
+
+    # 复制 BetterGI-主界面检测脚本
+    main_script = SCRIPT_DIR / "BetterGI-主界面检测脚本"
+    if main_script.is_dir():
+        dest = PACKAGE_DIR / "BetterGI-主界面检测脚本"
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(main_script, dest)
+        print(f"[信息] 复制: BetterGI-主界面检测脚本")
 
     # 打包 zip
     archive = DIST_DIR / ARCHIVE_NAME

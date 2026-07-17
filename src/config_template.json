@@ -20,7 +20,9 @@
     "path": "C:/Program Files/Tesseract-OCR"
   },
   "hotkeys": {
-    "stop": "ctrl+shift+q"
+    "stop": "ctrl+shift+q",
+    "pause": "ctrl+shift+p",
+    "start": ""
   },
   "settings": {
     "auto_minimize": true
