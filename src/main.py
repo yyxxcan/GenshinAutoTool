@@ -7801,8 +7801,9 @@ class GenshinMultiAccountToolGUI:
         cfg = load_scheduler_config()
         if not cfg.get("schedules"):
             return  # 没有任务，不启动
-        if not self.scheduler_event.is_set():
-            return  # 调度器已在运行
+        # 若已有调度线程在跑则跳过（防止开机自启 + 手动启动双线程）
+        if self.scheduler_thread is not None and self.scheduler_thread.is_alive():
+            return
         self.scheduler_event.clear()
         self.scheduler_thread = threading.Thread(target=self._scheduler_loop, daemon=True)
         self.scheduler_thread.start()
